@@ -4,6 +4,7 @@ import mmap
 import shutil
 import struct
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -81,21 +82,39 @@ def _set_tray_accent(state: int, flags: int = 0, color: int = 0):
         user32.SetWindowCompositionAttribute(sec, ctypes.byref(data))
 
 
-def apply_win32_taskbar_backdrop(mode_key: str, force_reset_blur: bool = False):
-    """Set underlying Win32 Shell_TrayWnd & Shell_SecondaryTrayWnd backdrop.
+_backdrop_lock = threading.Lock()
+_pending_backdrop: tuple[str, bool] | None = None
+_backdrop_worker_running = False
 
-    NOTE: Never use ACCENT_ENABLE_ACRYLICBLURBEHIND (4) on Shell_TrayWnd on Win11 24H2,
-    as DWM latches the acrylic brush and refuses to return to transparent gradient!
-    Instead, 'max_frosted' / 'normal' uses ACCENT_DISABLED (restoring Win11's native
-    dark Mica/Acrylic XAML taskbar), and 'clear' uses ACCENT_ENABLE_TRANSPARENTGRADIENT.
-    """
-    if mode_key in ("normal", "max_frosted"):
-        _set_tray_accent(ACCENT_DISABLED, 0, 0x00000000)
-    else:
-        if force_reset_blur:
-            # Clear any previously latched DWM acrylic state before applying transparent gradient
+
+def _backdrop_worker():
+    global _pending_backdrop, _backdrop_worker_running
+    while True:
+        with _backdrop_lock:
+            task = _pending_backdrop
+            _pending_backdrop = None
+            if task is None:
+                _backdrop_worker_running = False
+                return
+        mode_key, force_reset_blur = task
+        if mode_key in ("normal", "max_frosted"):
             _set_tray_accent(ACCENT_DISABLED, 0, 0x00000000)
-        _set_tray_accent(ACCENT_ENABLE_TRANSPARENTGRADIENT, 2, 0x00000000)
+        else:
+            if force_reset_blur:
+                _set_tray_accent(ACCENT_DISABLED, 0, 0x00000000)
+            _set_tray_accent(ACCENT_ENABLE_TRANSPARENTGRADIENT, 2, 0x00000000)
+
+
+def apply_win32_taskbar_backdrop(mode_key: str, force_reset_blur: bool = False):
+    """Asynchronously apply Win32 Shell_TrayWnd backdrop so Explorer DWM sync never blocks the UI thread."""
+    global _pending_backdrop, _backdrop_worker_running
+    with _backdrop_lock:
+        if _pending_backdrop is not None and _pending_backdrop[1]:
+            force_reset_blur = True
+        _pending_backdrop = (mode_key, force_reset_blur)
+        if not _backdrop_worker_running:
+            _backdrop_worker_running = True
+            threading.Thread(target=_backdrop_worker, name="AuroraTaskbarBackdrop", daemon=True).start()
 
 
 def import_existing_ttb_config() -> dict:
@@ -172,7 +191,7 @@ class TaskbarTransparencyEngine(QObject):
         now_max = self._detect_maximized_state()
         if now_max != self._maximized_active:
             self._maximized_active = now_max
-            apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=(not now_max))
+            apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=False)
             self._write_shared_state()
 
     def _ensure_persistent_tap_dll(self):

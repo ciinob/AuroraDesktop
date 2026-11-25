@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QPolygonF,
 )
 from PySide6.QtWidgets import QMenu, QWidget
@@ -226,9 +227,11 @@ class AuroraClockWidget(QWidget):
         self._hover_anim.setDuration(220)
         self._hover_anim.valueChanged.connect(self._on_hover_val)
 
-        # Style cross-fade
+        # Style cross-fade & static face cache (avoids 20x strokePath re-rasterization during 240Hz hover!)
         self._xfade = 1.0
         self._xfade_pix = None
+        self._face_cache_key = None
+        self._face_cache_pix: QPixmap | None = None
         self._xfade_anim = HighRefreshAnimation(self)
         self._xfade_anim.setDuration(360)
         self._xfade_anim.valueChanged.connect(self._on_xfade_val)
@@ -669,20 +672,52 @@ class AuroraClockWidget(QWidget):
         painter.drawPath(path)
 
     # ------------------------------------------------------------- paint
+    def _ensure_face_pixmap(self, style: str, now: datetime, hh: str, mm: str, suffix: str, sc: float, c1: QColor, cm: QColor, c2: QColor) -> QPixmap:
+        w, h = self.width(), self.height()
+        dpr = self.devicePixelRatioF() or 1.0
+        key = (
+            style,
+            hh,
+            mm,
+            suffix,
+            now.year,
+            now.month,
+            now.day,
+            now.hour,
+            round(sc, 3),
+            w,
+            h,
+            round(dpr, 2),
+            c1.rgba(),
+            cm.rgba(),
+            c2.rgba(),
+        )
+        if self._face_cache_key == key and self._face_cache_pix is not None:
+            return self._face_cache_pix
+
+        pm = QPixmap(max(1, int(round(w * dpr))), max(1, int(round(h * dpr))))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+
+        sub = QPainter(pm)
+        sub.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        fn = self._painters.get(style, self._paint_nordic)
+        fn(sub, now, hh, mm, suffix, sc, float(w), c1, cm, c2)
+        sub.end()
+
+        self._face_cache_key = key
+        self._face_cache_pix = pm
+        return pm
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
 
         if not self.cfg.get("click_through", False):
             painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
 
         c1, cm, c2 = self._theme_provider()
         self._paint_hover_glass(painter, c1, c2)
-
-        if self._xfade_pix is not None and self._xfade < 1.0:
-            painter.setOpacity(1.0 - self._xfade)
-            painter.drawPixmap(0, 0, self._xfade_pix)
-            painter.setOpacity(self._xfade)
 
         now = datetime.now()
         sc = self._scale()
@@ -691,10 +726,16 @@ class AuroraClockWidget(QWidget):
         hh = now.strftime("%H") if use_24h else (now.strftime("%I").lstrip("0") or "12")
         mm = now.strftime("%M")
         suffix = now.strftime("%S") if show_sec else ("" if use_24h else now.strftime("%p"))
-
         style = self.cfg.get("style", "nordic_modern")
-        fn = self._painters.get(style, self._paint_nordic)
-        fn(painter, now, hh, mm, suffix, sc, float(self.width()), c1, cm, c2)
+
+        face_pm = self._ensure_face_pixmap(style, now, hh, mm, suffix, sc, c1, cm, c2)
+
+        if self._xfade_pix is not None and self._xfade < 1.0:
+            painter.setOpacity(1.0 - self._xfade)
+            painter.drawPixmap(0, 0, self._xfade_pix)
+            painter.setOpacity(self._xfade)
+
+        painter.drawPixmap(0, 0, face_pm)
 
     # ---- 1. Nordic Modern ------------------------------------------------
     def _paint_nordic(self, painter, now, hh, mm, sfx, sc, w, c1, cm, c2):

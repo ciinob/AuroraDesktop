@@ -1,5 +1,6 @@
 import ctypes
 from ctypes import wintypes
+import threading
 import time
 from PySide6.QtCore import QObject, Signal, QTimer
 
@@ -67,6 +68,7 @@ WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+WM_QUIT = 0x0012
 WM_LBUTTONDOWN = 0x0201
 VK_CONTROL = 0x11
 VK_LCONTROL = 0xA2
@@ -359,6 +361,18 @@ user32.RegisterWindowMessageW.restype = wintypes.UINT
 
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+
+user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostThreadMessageW.restype = wintypes.BOOL
+
+user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+user32.GetMessageW.restype = wintypes.BOOL
+
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.TranslateMessage.restype = wintypes.BOOL
+
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageW.restype = LRESULT
 
 user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
 user32.AllowSetForegroundWindow.restype = wintypes.BOOL
@@ -688,47 +702,76 @@ def is_click_on_blank_desktop(x: int, y: int, own_hwnds: set[int]) -> bool:
 
 
 class DesktopDoubleClickWatcher(QObject):
-    """Lightweight WH_MOUSE_LL listener that detects double-clicks on blank desktop area."""
+    """Dedicated-thread WH_MOUSE_LL listener so UI rendering or DWM calls NEVER stall the mouse cursor."""
     desktopDoubleClicked = Signal()
+    _candidateDoubleClicked = Signal(int, int)
 
     def __init__(self, own_hwnds_provider, parent=None):
         super().__init__(parent)
         self._own_hwnds_provider = own_hwnds_provider
         self._hook = None
+        self._thread: threading.Thread | None = None
+        self._hook_tid: int = 0
         self._last_click_time = 0.0
         self._last_pt = (0, 0)
+        self._dbl_sec = user32.GetDoubleClickTime() / 1000.0
+        self._dx = max(user32.GetSystemMetrics(SM_CXDOUBLECLK), 6)
+        self._dy = max(user32.GetSystemMetrics(SM_CYDOUBLECLK), 6)
         self._hook_proc = HOOKPROC(self._mouse_callback)
+        self._candidateDoubleClicked.connect(self._verify_and_emit)
 
     def start(self):
-        if self._hook:
+        if self._thread is not None and self._thread.is_alive():
             return
-        hmod = kernel32.GetModuleHandleW(None)
-        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._hook_proc, hmod, 0)
+        self._dbl_sec = user32.GetDoubleClickTime() / 1000.0
+        self._dx = max(user32.GetSystemMetrics(SM_CXDOUBLECLK), 6)
+        self._dy = max(user32.GetSystemMetrics(SM_CYDOUBLECLK), 6)
+        self._thread = threading.Thread(target=self._thread_loop, name="AuroraMouseHook", daemon=True)
+        self._thread.start()
 
     def stop(self):
-        if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
+        tid = self._hook_tid
+        if tid:
+            user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.4)
+        self._thread = None
+        self._hook_tid = 0
+
+    def _thread_loop(self):
+        self._hook_tid = int(kernel32.GetCurrentThreadId())
+        hmod = kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._hook_proc, hmod, 0)
+        if not self._hook:
+            self._hook_tid = 0
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        user32.UnhookWindowsHookEx(self._hook)
+        self._hook = None
+        self._hook_tid = 0
 
     def _mouse_callback(self, nCode: int, wParam: int, lParam: int) -> int:
-        if nCode >= 0 and wParam == WM_LBUTTONDOWN:
-            info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-            x, y = info.pt.x, info.pt.y
-            now = time.monotonic()
-            dbl_ms = user32.GetDoubleClickTime() / 1000.0
-            dx = max(user32.GetSystemMetrics(SM_CXDOUBLECLK), 6)
-            dy = max(user32.GetSystemMetrics(SM_CYDOUBLECLK), 6)
+        # Fast-path 99.99% of events (WM_MOUSEMOVE at 1000-8000Hz) in ~1 microsecond!
+        if nCode < 0 or wParam != WM_LBUTTONDOWN:
+            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-            if (
-                (now - self._last_click_time) <= dbl_ms
-                and abs(x - self._last_pt[0]) <= dx
-                and abs(y - self._last_pt[1]) <= dy
-            ):
-                self._last_click_time = 0.0
-                QTimer.singleShot(0, lambda px=x, py=y: self._verify_and_emit(px, py))
-            else:
-                self._last_click_time = now
-                self._last_pt = (x, y)
+        info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+        x, y = info.pt.x, info.pt.y
+        now = time.monotonic()
+
+        if (
+            (now - self._last_click_time) <= self._dbl_sec
+            and abs(x - self._last_pt[0]) <= self._dx
+            and abs(y - self._last_pt[1]) <= self._dy
+        ):
+            self._last_click_time = 0.0
+            self._candidateDoubleClicked.emit(x, y)
+        else:
+            self._last_click_time = now
+            self._last_pt = (x, y)
 
         return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
@@ -739,30 +782,51 @@ class DesktopDoubleClickWatcher(QObject):
 
 
 class DoubleCtrlWatcher(QObject):
-    """Lightweight WH_KEYBOARD_LL listener that detects quick Double-Tap Ctrl (like Raycast / Listary)."""
+    """Dedicated-thread WH_KEYBOARD_LL listener that detects quick Double-Tap Ctrl."""
     doubleCtrlPressed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hook = None
+        self._thread: threading.Thread | None = None
+        self._hook_tid: int = 0
         self._ctrl_down = False
         self._other_key_pressed = False
         self._last_ctrl_up_time = 0.0
         self._hook_proc = HOOKPROC(self._kbd_callback)
 
     def start(self):
-        if self._hook:
+        if self._thread is not None and self._thread.is_alive():
             return
-        hmod = kernel32.GetModuleHandleW(None)
-        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc, hmod, 0)
+        self._thread = threading.Thread(target=self._thread_loop, name="AuroraKbdHook", daemon=True)
+        self._thread.start()
 
     def stop(self):
-        if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
+        tid = self._hook_tid
+        if tid:
+            user32.PostThreadMessageW(tid, WM_QUIT, 0, 0)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.4)
+        self._thread = None
+        self._hook_tid = 0
+
+    def _thread_loop(self):
+        self._hook_tid = int(kernel32.GetCurrentThreadId())
+        hmod = kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc, hmod, 0)
+        if not self._hook:
+            self._hook_tid = 0
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        user32.UnhookWindowsHookEx(self._hook)
+        self._hook = None
+        self._hook_tid = 0
 
     def _kbd_callback(self, nCode: int, wParam: int, lParam: int) -> int:
-        if nCode >= 0:
+        if nCode >= 0 and wParam in (WM_KEYDOWN, WM_KEYUP):
             info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = info.vkCode
             is_ctrl = vk in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL)
@@ -772,13 +836,13 @@ class DoubleCtrlWatcher(QObject):
                     self._ctrl_down = True
                 else:
                     self._other_key_pressed = True
-            elif wParam == WM_KEYUP:
+            else:
                 if is_ctrl:
                     now = time.monotonic()
                     if self._ctrl_down and not self._other_key_pressed:
                         if 0.04 <= (now - self._last_ctrl_up_time) <= 0.36:
                             self._last_ctrl_up_time = 0.0
-                            QTimer.singleShot(0, self.doubleCtrlPressed.emit)
+                            self.doubleCtrlPressed.emit()
                         else:
                             self._last_ctrl_up_time = now
                     self._ctrl_down = False
