@@ -90,6 +90,8 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 3. 右键托盘图标：切换主题色温 / 玻璃通透度 / 时钟风格 / 速记便签
 
 > 系统要求：Windows 11（24H2 已验证）
+>
+> 便携版将 `config.json`、`Groups/`、`memo.txt` 放在 exe 同目录；装在只读目录（如 Program Files）时自动改用 `%APPDATA%\AuroraDesktop`。托盘菜单「🔄 检查更新」可一键查看新版本。
 
 ## 🛠️ 从源码运行
 
@@ -103,7 +105,13 @@ rebuild_exe.bat                   # PyInstaller 打包并热替换运行中的 e
 
 - **UI 层**：Python 3.13 + PySide6（自绘毛玻璃、QPainterPath 文字光晕、高刷新动画）
 - **原生层**：C++ XAML 任务栏引擎 + Win32 API（置底、点击穿透、全局热键）
+- **原生层**：C++ XAML 任务栏引擎 + Win32 API（置底、点击穿透、全局热键），`src/native/CMakeLists.txt` 可从源码重建 DLL
 - **字体排版**：Outfit / Cormorant Garamond / Playfair Display / Great Vibes / Ruthligos / 华文行楷，全部随包内置
+- **持续集成**：GitHub Actions 自动打包并随 tag 发布 Release（附 SHA256 校验）
+
+## 📄 许可
+
+程序源码 [MIT](LICENSE)；内置字体各自遵循其许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 

@@ -1,5 +1,9 @@
+import os
 import sys
 from pathlib import Path
+
+
+APP_VERSION = "1.0.1"
 
 
 def get_bundle_dir() -> Path:
@@ -9,14 +13,54 @@ def get_bundle_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _is_writable(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".aurora_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _has_existing_data(directory: Path) -> bool:
+    return (directory / "config.json").exists() or (directory / "Groups").is_dir()
+
+
 def get_data_root() -> Path:
-    """Persistent root directory for Groups, config.json, and icon cache."""
-    default_root = Path(r"D:\AuroraDesktop")
-    if default_root.exists():
-        return default_root
+    """Persistent root for Groups, config.json, memo.txt and the icon cache.
+
+    Priority:
+      1. Portable install: an existing config next to the exe (or a development
+         checkout) -- keeps older D:\\AuroraDesktop installs working unchanged.
+      2. A writable exe directory -- fresh portable download, data stays next
+         to the exe.
+      3. %APPDATA%\\AuroraDesktop -- only when the exe directory is read-only
+         (e.g. installed under Program Files).
+    """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+        exe_dir = Path(sys.executable).resolve().parent
+    else:
+        exe_dir = Path(__file__).resolve().parent.parent
+
+    if _has_existing_data(exe_dir):
+        return exe_dir
+
+    # Backwards compatibility for installs whose data lives in the historical
+    # hard-coded D:\AuroraDesktop while the exe was moved elsewhere.
+    legacy = Path(r"D:\AuroraDesktop")
+    if legacy != exe_dir and _has_existing_data(legacy):
+        return legacy
+
+    if _is_writable(exe_dir):
+        return exe_dir
+
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    fallback = base / "AuroraDesktop"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 BUNDLE_DIR = get_bundle_dir()

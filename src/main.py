@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import webbrowser
 import winreg
 from pathlib import Path
 
@@ -19,9 +20,10 @@ from clock_widget import AuroraClockWidget
 from icon_extractor import ShortcutIconLoader
 from memo_card import AuroraMemoCard
 from organize_shortcuts import scan_and_organize
-from paths import CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
+from paths import APP_VERSION, CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
 from spotlight import AuroraSpotlightOverlay
 from taskbar_engine import TaskbarTransparencyEngine, import_existing_ttb_config
+from updater import UpdateChecker
 from widgets import (
     AICapsuleBar,
     AURORA_THEMES,
@@ -157,8 +159,10 @@ class AuroraController(QObject):
             "scale": 1.0,
             "locked": False,
             "click_through": False,
-            "x": 2172,
-            "y": 20,
+            # None -> the widget centres on the top-right of the primary screen
+            # at runtime, instead of assuming a 2560px-wide monitor.
+            "x": None,
+            "y": None,
         }
         self.clock_cfg: dict = {**default_clock_cfg, **self.config.get("clock", {})}
         self.clock_widget = AuroraClockWidget(
@@ -748,10 +752,9 @@ class AuroraController(QObject):
         return True
 
     def _toggle_autorun(self, checked: bool):
-        target_exe = DATA_ROOT / "AuroraDesktop.exe"
-        if target_exe.exists():
-            exe_cmd = f'"{target_exe}"'
-        elif getattr(sys, "frozen", False):
+        # Always point at the exe we are actually running from; DATA_ROOT may
+        # live in %APPDATA% for non-portable installs.
+        if getattr(sys, "frozen", False):
             exe_cmd = f'"{sys.executable}"'
         else:
             exe_cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
@@ -777,7 +780,17 @@ class AuroraController(QObject):
         tray_icon = QIcon(str(icon_file)) if icon_file.exists() else self.app.style().standardIcon(self.app.style().StandardPixmap.SP_DesktopIcon)
 
         self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip("AuroraDesktop v2.0 · 极光毛玻璃桌面收纳\n双击 Ctrl：极光全局搜索 | 双击桌面空白：一键隐身")
+        self.tray.setToolTip(f"Aurora Desktop v{APP_VERSION} · 极光毛玻璃桌面收纳\n双击 Ctrl：极光全局搜索 | 双击桌面空白：一键隐身")
+
+        # Release check is user-triggered only (no background network traffic).
+        self.update_checker = UpdateChecker(APP_VERSION, self)
+        self.update_checker.updateFound.connect(self._on_update_found)
+        self.update_checker.upToDate.connect(
+            lambda: QMessageBox.information(None, "Aurora Desktop", "已是最新版本 ✨")
+        )
+        self.update_checker.checkFailed.connect(
+            lambda err: QMessageBox.warning(None, "Aurora Desktop", f"检查更新失败：{err}")
+        )
 
         menu = QMenu()
         menu.setStyleSheet(MENU_QSS)
@@ -854,6 +867,9 @@ class AuroraController(QObject):
         act_autorun.setChecked(self._is_autorun_enabled())
         act_autorun.toggled.connect(self._toggle_autorun)
 
+        act_update = menu.addAction("🔄 检查更新")
+        act_update.triggered.connect(self.update_checker.check)
+
         menu.addSeparator()
         act_quit = menu.addAction("退出 AuroraDesktop")
         act_quit.triggered.connect(self.quit_app)
@@ -861,6 +877,16 @@ class AuroraController(QObject):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _on_update_found(self, tag: str, url: str):
+        reply = QMessageBox.question(
+            None,
+            "Aurora Desktop 更新",
+            f"发现新版本 {tag}，是否前往下载页？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            webbrowser.open(url)
 
     def _on_lock_toggled(self, checked: bool):
         self.lock_positions = checked

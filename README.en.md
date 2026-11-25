@@ -90,6 +90,8 @@ A custom C++ native engine (`AuroraTaskbarTAP.dll`, combining XAML `BackgroundFi
 3. Right-click the tray icon to switch theme temperature / glass opacity / clock style / quick memo
 
 > Requirement: Windows 11 (verified on 24H2)
+>
+> Portable builds keep `config.json`, `Groups/` and `memo.txt` next to the exe; if installed in a read-only directory (e.g. Program Files), data moves to `%APPDATA%\AuroraDesktop`. Use the tray menu "🔄 Check for updates" to see new releases.
 
 ## 🛠️ Run from Source
 
@@ -103,7 +105,13 @@ rebuild_exe.bat                   # PyInstaller build + hot-swap the running exe
 
 - **UI**: Python 3.13 + PySide6 (custom frosted glass, QPainterPath text halos, high-refresh animations)
 - **Native layer**: C++ XAML taskbar engine + Win32 API (desktop pinning, click-through, global hotkeys)
+- **Native layer**: C++ XAML taskbar engine + Win32 API (desktop pinning, click-through, global hotkeys); rebuild the DLL from source via `src/native/CMakeLists.txt`
 - **Typography**: Outfit / Cormorant Garamond / Playfair Display / Great Vibes / Ruthligos / STXingkai — all bundled
+- **CI**: GitHub Actions builds the exe and publishes a Release with a SHA256 checksum on every version tag
+
+## 📄 License
+
+Application source is [MIT](LICENSE); bundled fonts keep their own licenses — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

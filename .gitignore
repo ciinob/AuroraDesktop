@@ -7,3 +7,10 @@ Removed_Backup/
 config.json
 Groups/
 _clock_preview/
+memo.txt
+.aurora_write_probe
+
+# Runtime copy of the DLL (taskbar_engine.py copies it out of assets/)
+/AuroraTaskbarTAP.dll
+# MSVC import library is a build artifact, not needed at runtime
+/assets/AuroraTaskbarTAP.lib
