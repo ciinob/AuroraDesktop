@@ -419,8 +419,8 @@ class AuroraController(QObject):
                 col_x += self.CARD_W + self.COL_GAP
                 curr_y = start_y
 
-            if w.x() != col_x or w.y() != curr_y or w.height() != target_h:
-                updates.append((int(w.winId()), col_x, curr_y, w.width(), target_h))
+            if w.x() != col_x or w.y() != curr_y:
+                updates.append((int(w.winId()), col_x, curr_y, w.width(), w.height()))
 
             extra_gap = 2 if idx == 0 else 0
             curr_y += target_h + self.CARD_GAP + extra_gap

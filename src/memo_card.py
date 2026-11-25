@@ -102,6 +102,7 @@ class AuroraMemoCard(AuroraBaseWindow):
     def _on_height_val(self, val):
         h = max(self.HEADER_HEIGHT, int(round(val)))
         self._target_anim_h = h
+        self.resize(self.CARD_WIDTH, h)
         self.editor.setVisible(h > self.HEADER_HEIGHT + 24)
         self.heightAnimated.emit()
 

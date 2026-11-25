@@ -320,17 +320,15 @@ def send_to_bottom(hwnd: int):
 
 
 def batch_defer_window_rects(rect_updates: list[tuple[int, int, int, int, int]]):
-    """Atomically move & resize multiple HWNDs in one single 240Hz DWM composition transaction!
-    Each tuple is (hwnd, x, y, width, height).
-    """
+    """Atomically move multiple HWNDs in one single 240Hz DWM composition transaction!"""
     if not rect_updates:
         return
     hdwp = user32.BeginDeferWindowPos(len(rect_updates))
     if not hdwp:
         return
-    flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
+    flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
     for hwnd, x, y, w, h in rect_updates:
-        hdwp = user32.DeferWindowPos(hdwp, hwnd, None, x, y, w, h, flags)
+        hdwp = user32.DeferWindowPos(hdwp, hwnd, None, x, y, 0, 0, flags)
         if not hdwp:
             return
     user32.EndDeferWindowPos(hdwp)

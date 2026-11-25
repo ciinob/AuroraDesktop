@@ -36,6 +36,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QRadialGradient,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -1195,6 +1196,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self.setAcceptDrops(True)
 
         self._grid_container = QWidget(self)
+        self._grid_container.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._grid_container.setAutoFillBackground(False)
+        self._grid_container.setStyleSheet("background: transparent;")
         self._grid_container.setMouseTracking(True)
 
         self._height_anim = HighRefreshAnimation(self)
@@ -1254,18 +1258,24 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self.update()
 
     def _capture_grid_snapshot(self):
-        if self._grid_snapshot is None or self._grid_snapshot.size() != self._grid_container.size():
-            was_vis = self._grid_container.isVisible()
-            if not was_vis:
-                self._grid_container.setGeometry(0, self.HEADER_HEIGHT, self.CARD_WIDTH, self._expanded_height - self.HEADER_HEIGHT)
-                self._grid_container.show()
-            self._grid_snapshot = self._grid_container.grab()
-            if not was_vis:
-                self._grid_container.hide()
+        sz = self._grid_container.size()
+        if sz.width() <= 0 or sz.height() <= 0:
+            return
+        if self._grid_snapshot is None or self._grid_snapshot.size() != sz:
+            pm = QPixmap(sz)
+            pm.fill(Qt.transparent)
+            # Render ONLY children onto 100% transparent RGBA buffer (never DrawWindowBackground which flashes white!)
+            for child in self._grid_container.findChildren(AuroraIconTile):
+                child.render(pm, child.pos(), QRegion(), QWidget.RenderFlag.DrawChildren)
+            self._grid_snapshot = pm
 
     def _on_height_val(self, val):
-        self._target_anim_h = max(self.HEADER_HEIGHT, int(round(val)))
-        # Delegate actual Win32 DeferWindowPos resize + stack cascade to controller in one atomic 240Hz batch!
+        new_h = max(self.HEADER_HEIGHT, int(round(val)))
+        if new_h == self._target_anim_h and self.height() == new_h:
+            return
+        self._target_anim_h = new_h
+        # Keep Qt's UpdateLayeredWindow RGBA backing store 100% synced (0 child relayout since _grid_container is hidden)
+        self.resize(self.CARD_WIDTH, new_h)
         self.heightAnimated.emit()
         self.update()
 
