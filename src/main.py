@@ -142,19 +142,9 @@ class AuroraController(QObject):
         self._rebuild_groups_meta()
 
         if FONTS_DIR.exists():
-            for font_name in (
-                "Inter-Regular.ttf",
-                "Inter-Medium.ttf",
-                "Inter-SemiBold.ttf",
-                "Outfit-ExtraLight.ttf",
-                "Outfit-Light.ttf",
-                "Cormorant-Light.ttf",
-                "Ruthligos.ttf",
-                "GeosansLight.ttf",
-            ):
-                fp = FONTS_DIR / font_name
-                if fp.exists():
-                    QFontDatabase.addApplicationFont(str(fp))
+            # Register every bundled typeface (Inter / Outfit / Cormorant / Playfair / Great Vibes / Allura / Ruthligos ...)
+            for fp in sorted(list(FONTS_DIR.glob("*.ttf")) + list(FONTS_DIR.glob("*.otf"))):
+                QFontDatabase.addApplicationFont(str(fp))
         self.header_font_family = "Inter"
         self.icon_loader = ShortcutIconLoader()
 
@@ -486,6 +476,8 @@ class AuroraController(QObject):
         self.theme_key = theme_key
         for w in self._all_stackable_windows():
             w.update()
+        # Clock colon / hairlines / calligraphy gradients follow the aurora palette instantly
+        self.clock_widget.refresh()
         self._save_config()
 
     def set_glass_opacity(self, opacity_key: str):
