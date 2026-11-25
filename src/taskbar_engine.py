@@ -1,6 +1,8 @@
-import json
-import os
-import re
+import ctypes
+from ctypes import wintypes
+import mmap
+import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QMenu
 
+from paths import ASSETS_DIR, DATA_ROOT
 from widgets import MENU_QSS
 from win32_utils import (
     ACCENT_POLICY,
@@ -15,43 +18,42 @@ from win32_utils import (
     WINDOWCOMPOSITIONATTRIBDATA,
     user32,
 )
-import ctypes
 
 ACCENT_DISABLED = 0
 
-TASKBAR_MODES = {
-    "clear": ("💎 全透明纯净无底色 (Clear · 推荐)", "clear", "#00000000"),
-    "acrylic_clear": ("✨ 原生高透毛玻璃 (Acrylic)", "acrylic", "#00000000"),
-    "aurora_glass": ("🌌 极光深海毛玻璃 (与左侧卡片同色)", "acrylic", "#0A0F1C78"),
-    "blur": ("🌫️ 柔雾高斯模糊 (Blur)", "blur", "#00000000"),
-    "normal": ("⬛ 恢复系统默认任务栏 (Normal)", "normal", "#00000000"),
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+# {D4E8A9B2-71F3-4C6D-9A2E-8B5F1C3D4E60}
+CLSID_AURORA_TAP = GUID(
+    0xD4E8A9B2,
+    0x71F3,
+    0x4C6D,
+    (ctypes.c_ubyte * 8)(0x9A, 0x2E, 0x8B, 0x5F, 0x1C, 0x3D, 0x4E, 0x60),
+)
+
+# Mode IDs matching AuroraTaskbarTAP.cpp:
+# 0 = Clear (0.0 opacity), 1 = Airy Glass (0.32), 2 = Deep Aurora Glass (0.68), 3 = System Default
+TASKBAR_MODES: dict[str, tuple[str, int]] = {
+    "clear": ("💎 全透明纯净无底色 (Clear · 默认)", 0),
+    "acrylic_clear": ("✨ 轻透微雾毛玻璃 (Airy Glass)", 1),
+    "aurora_glass": ("🌌 深邃极光暗夜底栏 (Deep Glass)", 2),
+    "normal": ("⬛ 恢复系统默认任务栏 (System Default)", 3),
 }
 
-
-def find_ttb_settings_path() -> Path | None:
-    local_pkgs = Path(os.environ.get("LOCALAPPDATA", "")) / "Packages"
-    if local_pkgs.exists():
-        for pkg in local_pkgs.glob("*TranslucentTB*"):
-            candidate = pkg / "RoamingState" / "settings.json"
-            if candidate.exists():
-                return candidate
-    appdata_ttb = Path(os.environ.get("APPDATA", "")) / "TranslucentTB" / "settings.json"
-    if appdata_ttb.exists():
-        return appdata_ttb
-    return None
-
-
-def find_ttb_executable() -> Path | None:
-    cand = Path(os.environ.get("LOCALAPPDATA", "")) / r"Microsoft\WindowsApps\ttb.exe"
-    if cand.exists():
-        return cand
-    return None
+SHARED_MEM_NAME = "Local\\AuroraTaskbarSharedState_v1"
+PERSISTENT_TAP_DLL = DATA_ROOT / "AuroraTaskbarTAP.dll"
 
 
 def clear_legacy_win32_taskbar_black_state():
-    """Clear any legacy Win32 SetWindowCompositionAttribute state on Shell_TrayWnd
-    that causes Windows 11 24H2 XAML taskbars to render solid black!
-    """
+    """Ensure Shell_TrayWnd has clean Win32 composition state on Windows 11 24H2."""
     accent = ACCENT_POLICY()
     accent.AccentState = ACCENT_DISABLED
     accent.AccentFlags = 0
@@ -76,170 +78,145 @@ def clear_legacy_win32_taskbar_black_state():
 
 
 def import_existing_ttb_config() -> dict:
-    default_cfg = {
+    return {
         "enabled": True,
         "mode": "clear",
         "show_line": False,
-        "max_win_acrylic": False,
     }
-    sp = find_ttb_settings_path()
-    if not sp:
-        return default_cfg
 
-    try:
-        raw = sp.read_text(encoding="utf-8")
-        cleaned = re.sub(r"^\s*//.*$", "", raw, flags=re.MULTILINE)
-        data = json.loads(cleaned)
-        desk = data.get("desktop_appearance", {})
-        accent = desk.get("accent", "clear")
-        color = desk.get("color", "#00000000").upper()
-        if accent == "clear":
-            default_cfg["mode"] = "clear"
-        elif accent == "blur":
-            default_cfg["mode"] = "blur"
-        elif accent == "normal":
-            default_cfg["mode"] = "normal"
-        elif color not in ("#00000000", "#00000001"):
-            default_cfg["mode"] = "aurora_glass"
-        else:
-            default_cfg["mode"] = "acrylic_clear"
 
-        default_cfg["show_line"] = bool(desk.get("show_line", False))
-        default_cfg["max_win_acrylic"] = bool(data.get("maximized_window_appearance", {}).get("enabled", False))
-    except Exception:
-        pass
-    return default_cfg
+def _get_explorer_taskbar_pid() -> int:
+    tray = user32.FindWindowW("Shell_TrayWnd", None)
+    if not tray:
+        return 0
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(tray, ctypes.byref(pid))
+    return int(pid.value)
 
 
 class TaskbarTransparencyEngine(QObject):
-    """Windows 11 24H2 Safe Taskbar Controller:
-    Drives TranslucentTB's signed XAML Visual Tree engine via strict schema-valid settings.json
-    WITHOUT calling conflicting Win32 SetWindowCompositionAttribute on Shell_TrayWnd!
+    """100% Self-Contained Native Windows 11 Taskbar XAML Transparency Engine!
+    Uses our bundled AuroraTaskbarTAP.dll via Windows.UI.Xaml!InitializeXamlDiagnosticsEx.
+    Zero external dependency on TranslucentTB or Rainmeter!
     """
     configChanged = Signal()
 
     def __init__(self, tb_cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = tb_cfg
-        self._ttb_settings_path = find_ttb_settings_path()
-        self._ttb_exe = find_ttb_executable()
+        if self.cfg.get("mode") not in TASKBAR_MODES:
+            self.cfg["mode"] = "clear"
 
-        # Immediately clear any broken Win32 accent state that turned Win11 24H2 taskbar black
+        self._version = 1
+        self._shm: mmap.mmap | None = None
+        self._injected_pid = 0
+
+        self._ensure_persistent_tap_dll()
+        self._init_shared_memory()
         clear_legacy_win32_taskbar_black_state()
         self.apply_all()
 
-        # Lightweight health check every 8s to ensure XAML driver stays alive
+        # Monitor Explorer restarts (e.g. if explorer.exe restarts, re-attach TAP DLL automatically)
         self._guard_timer = QTimer(self)
-        self._guard_timer.setInterval(8000)
-        self._guard_timer.timeout.connect(self._ensure_xaml_driver_running)
+        self._guard_timer.setInterval(5000)
+        self._guard_timer.timeout.connect(self._check_explorer_alive)
         self._guard_timer.start()
 
-    def apply_all(self):
+    def _ensure_persistent_tap_dll(self):
+        bundled = ASSETS_DIR / "AuroraTaskbarTAP.dll"
+        if bundled.exists():
+            try:
+                if not PERSISTENT_TAP_DLL.exists() or bundled.stat().st_size != PERSISTENT_TAP_DLL.stat().st_size:
+                    shutil.copy2(str(bundled), str(PERSISTENT_TAP_DLL))
+                    subprocess.run(
+                        ["icacls", str(PERSISTENT_TAP_DLL), "/grant", "*S-1-15-2-1:(RX)", "/grant", "*S-1-1-0:(RX)"],
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        check=False,
+                    )
+            except OSError:
+                # Already loaded in explorer.exe — existing DLL on disk is active and valid!
+                pass
+
+    def _init_shared_memory(self):
+        try:
+            self._shm = mmap.mmap(-1, 16, tagname=SHARED_MEM_NAME, access=mmap.ACCESS_WRITE)
+        except Exception:
+            self._shm = None
+
+    def _write_shared_state(self):
+        if not self._shm:
+            self._init_shared_memory()
+        if not self._shm:
+            return
+        self._version += 1
+        enabled = bool(self.cfg.get("enabled", True))
+        mode_key = self.cfg.get("mode", "clear")
+        _, mode_int = TASKBAR_MODES.get(mode_key, TASKBAR_MODES["clear"])
+        if not enabled:
+            mode_int = 3  # System default
+        show_line = 1 if self.cfg.get("show_line", False) else 0
+
+        self._shm.seek(0)
+        self._shm.write(struct.pack("<IIII", self._version, mode_int, show_line, 0))
+        self._shm.flush()
+
+    def _inject_tap_into_explorer(self) -> bool:
+        if not PERSISTENT_TAP_DLL.exists():
+            return False
+        pid = _get_explorer_taskbar_pid()
+        if pid <= 0:
+            return False
+        if pid == self._injected_pid:
+            return True
+
+        try:
+            wux = ctypes.WinDLL("Windows.UI.Xaml.dll")
+            init_fn = wux.InitializeXamlDiagnosticsEx
+            init_fn.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.LPCWSTR,
+                wintypes.LPCWSTR,
+                GUID,
+                wintypes.LPCWSTR,
+            ]
+            init_fn.restype = ctypes.c_long
+
+            dll_str = str(PERSISTENT_TAP_DLL)
+            for idx in range(1, 12):
+                conn = f"VisualDiagConnection{idx}"
+                hr = init_fn(conn, pid, None, dll_str, CLSID_AURORA_TAP, None)
+                if hr == 0:
+                    self._injected_pid = pid
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _check_explorer_alive(self):
         if not self.cfg.get("enabled", True):
             return
-        self._sync_xaml_backend()
+        pid = _get_explorer_taskbar_pid()
+        if pid > 0 and pid != self._injected_pid:
+            self._write_shared_state()
+            self._inject_tap_into_explorer()
 
-    def _ensure_xaml_driver_running(self):
-        if not self._ttb_exe or not self.cfg.get("enabled", True):
-            return
-        if self.cfg.get("mode") == "normal":
-            return
-        try:
-            out = subprocess.check_output(
-                ["tasklist", "/FI", "IMAGENAME eq TranslucentTB.exe", "/NH"],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=2,
-            ).decode("gbk", errors="ignore")
-            if "TranslucentTB.exe" not in out:
-                subprocess.Popen([str(self._ttb_exe)], creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception:
-            pass
+    def apply_all(self):
+        self._write_shared_state()
+        if self.cfg.get("enabled", True):
+            self._inject_tap_into_explorer()
 
-    def _sync_xaml_backend(self):
-        if not self._ttb_settings_path:
-            return
-        mode_key = self.cfg.get("mode", "clear")
-        _, accent_str, color_hex = TASKBAR_MODES.get(mode_key, TASKBAR_MODES["clear"])
-        show_line = bool(self.cfg.get("show_line", False))
-        max_enabled = bool(self.cfg.get("max_win_acrylic", False))
-
-        # Strictly conform to official TranslucentTB schema (no unknown keys!)
-        payload = {
-            "$schema": "https://TranslucentTB.github.io/settings.schema.json",
-            "desktop_appearance": {
-                "accent": accent_str,
-                "color": color_hex,
-                "show_peek": False,
-                "show_line": show_line,
-                "blur_radius": 9.0,
-            },
-            "visible_window_appearance": {
-                "enabled": False,
-                "accent": "clear",
-                "color": "#00000000",
-                "show_peek": True,
-                "show_line": show_line,
-                "blur_radius": 9.0,
-                "rules": {"window_class": {}, "window_title": {}, "process_name": {}},
-            },
-            "maximized_window_appearance": {
-                "enabled": max_enabled,
-                "accent": "acrylic",
-                "color": "#0A0F1CB0" if max_enabled else "#00000000",
-                "show_peek": True,
-                "show_line": True,
-                "blur_radius": 9.0,
-                "rules": {"window_class": {}, "window_title": {}, "process_name": {}},
-            },
-            "start_opened_appearance": {
-                "enabled": False,
-                "accent": "normal",
-                "color": "#00000000",
-                "show_peek": True,
-                "show_line": True,
-                "blur_radius": 9.0,
-            },
-            "search_opened_appearance": {
-                "enabled": False,
-                "accent": "normal",
-                "color": "#00000000",
-                "show_peek": True,
-                "show_line": True,
-                "blur_radius": 9.0,
-            },
-            "task_view_opened_appearance": {
-                "enabled": True,
-                "accent": "normal",
-                "color": "#00000000",
-                "show_peek": False,
-                "show_line": True,
-                "blur_radius": 9.0,
-            },
-            "battery_saver_appearance": {
-                "enabled": False,
-                "accent": "opaque",
-                "color": "#00000000",
-                "show_peek": True,
-                "show_line": False,
-                "blur_radius": 9.0,
-            },
-            "ignored_windows": {"window_class": [], "window_title": [], "process_name": []},
-            "disable_saving": False,
-            "verbosity": "warn",
-        }
-        try:
-            self._ttb_settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-        self._ensure_xaml_driver_running()
+    def shutdown_restore(self):
+        """Optionally keep or restore taskbar on exit."""
+        pass
 
     def build_taskbar_menu(self, parent_menu: QMenu) -> QMenu:
-        tb_menu = parent_menu.addMenu("🖥️ 任务栏透明样式")
+        tb_menu = parent_menu.addMenu("🖥️ 自研任务栏透明引擎 (无需 TranslucentTB)")
         tb_menu.setStyleSheet(MENU_QSS)
 
         cur_mode = self.cfg.get("mode", "clear")
         grp = QActionGroup(tb_menu)
-        for m_key, (m_label, _, _) in TASKBAR_MODES.items():
+        for m_key, (m_label, _) in TASKBAR_MODES.items():
             a = tb_menu.addAction(m_label)
             a.setCheckable(True)
             a.setChecked(m_key == cur_mode)
@@ -247,15 +224,10 @@ class TaskbarTransparencyEngine(QObject):
             a.triggered.connect(lambda checked=False, k=m_key: self._set_mode(k))
 
         tb_menu.addSeparator()
-        act_line = tb_menu.addAction("显示任务栏顶部 1px 分割线")
+        act_line = tb_menu.addAction("保留任务栏顶部 1px 分割细线")
         act_line.setCheckable(True)
         act_line.setChecked(bool(self.cfg.get("show_line", False)))
         act_line.toggled.connect(self._set_show_line)
-
-        act_max = tb_menu.addAction("窗口最大化时自动变深色毛玻璃")
-        act_max.setCheckable(True)
-        act_max.setChecked(bool(self.cfg.get("max_win_acrylic", False)))
-        act_max.toggled.connect(self._set_max_win)
 
         return tb_menu
 
@@ -266,10 +238,5 @@ class TaskbarTransparencyEngine(QObject):
 
     def _set_show_line(self, val: bool):
         self.cfg["show_line"] = val
-        self._sync_xaml_backend()
-        self.configChanged.emit()
-
-    def _set_max_win(self, val: bool):
-        self.cfg["max_win_acrylic"] = val
-        self._sync_xaml_backend()
+        self._write_shared_state()
         self.configChanged.emit()

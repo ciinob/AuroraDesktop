@@ -1,0 +1,4 @@
+LIBRARY AuroraTaskbarTAP
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
