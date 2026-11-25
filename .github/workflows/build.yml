@@ -27,8 +27,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # The prebuilt native DLL is committed under assets/, so no MSVC/XAML
-      # toolchain is needed here. To rebuild it from src/native, see CMakeLists.txt.
+      - name: Build native taskbar DLL
+        shell: pwsh
+        run: |
+          cmake -S src/native -B build/native -G "Visual Studio 17 2022" -A x64
+          cmake --build build/native --config Release
+          Copy-Item -Force build/native/out/Release/AuroraTaskbarTAP.dll assets/AuroraTaskbarTAP.dll
+
       - name: Build one-file exe
         run: |
           python -m PyInstaller --noconfirm --onefile --windowed --name AuroraDesktop `
@@ -51,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           $hash = (Get-FileHash dist/AuroraDesktop.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  AuroraDesktop.exe" | Out-File -Encoding utf8 dist/SHA256SUMS.txt
+          "$hash  AuroraDesktop.exe" | Out-File -Encoding utf8NoBOM dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4

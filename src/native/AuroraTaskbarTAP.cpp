@@ -428,14 +428,14 @@ public:
 
 static AuroraTapFactory g_Factory;
 
-extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv) {
+extern "C" HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv) {
     if (IsEqualCLSID(rclsid, CLSID_AuroraTaskbarTAP)) {
         return g_Factory.QueryInterface(riid, ppv);
     }
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
-extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllCanUnloadNow(void) {
+extern "C" HRESULT STDAPICALLTYPE DllCanUnloadNow(void) {
     return S_FALSE;
 }
 

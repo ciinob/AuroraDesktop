@@ -1,11 +1,17 @@
 import os
 import shutil
+import sys
 from pathlib import Path
 import win32com.client
 
-BASE_DIR = Path(r"D:\AuroraDesktop")
-GROUPS_DIR = BASE_DIR / "Groups"
-REMOVED_DIR = BASE_DIR / "Removed_Backup"
+_SRC_DIR = Path(__file__).resolve().parent / "src"
+if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from paths import DATA_ROOT, GROUPS_DIR
+
+BASE_DIR = DATA_ROOT
+REMOVED_DIR = DATA_ROOT / "Removed_Backup"
 
 GROUP_FOLDERS = {
     "AI_CAPSULE": GROUPS_DIR / "01_AI_CAPSULE",

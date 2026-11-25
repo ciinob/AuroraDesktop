@@ -1,7 +1,7 @@
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
-ASSETS_DIR = Path(r"D:\AuroraDesktop\assets")
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 

@@ -104,7 +104,6 @@ rebuild_exe.bat                   # PyInstaller 打包并热替换运行中的 e
 ## 🧱 技术栈
 
 - **UI 层**：Python 3.13 + PySide6（自绘毛玻璃、QPainterPath 文字光晕、高刷新动画）
-- **原生层**：C++ XAML 任务栏引擎 + Win32 API（置底、点击穿透、全局热键）
 - **原生层**：C++ XAML 任务栏引擎 + Win32 API（置底、点击穿透、全局热键），`src/native/CMakeLists.txt` 可从源码重建 DLL
 - **字体排版**：Outfit / Cormorant Garamond / Playfair Display / Great Vibes / Ruthligos / 华文行楷，全部随包内置
 - **持续集成**：GitHub Actions 自动打包并随 tag 发布 Release（附 SHA256 校验）

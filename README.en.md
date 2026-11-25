@@ -104,7 +104,6 @@ rebuild_exe.bat                   # PyInstaller build + hot-swap the running exe
 ## 🧱 Tech Stack
 
 - **UI**: Python 3.13 + PySide6 (custom frosted glass, QPainterPath text halos, high-refresh animations)
-- **Native layer**: C++ XAML taskbar engine + Win32 API (desktop pinning, click-through, global hotkeys)
 - **Native layer**: C++ XAML taskbar engine + Win32 API (desktop pinning, click-through, global hotkeys); rebuild the DLL from source via `src/native/CMakeLists.txt`
 - **Typography**: Outfit / Cormorant Garamond / Playfair Display / Great Vibes / Ruthligos / STXingkai — all bundled
 - **CI**: GitHub Actions builds the exe and publishes a Release with a SHA256 checksum on every version tag

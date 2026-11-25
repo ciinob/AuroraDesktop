@@ -21,6 +21,7 @@ target_compile_definitions(AuroraTaskbarTAP PRIVATE
 )
 
 target_link_libraries(AuroraTaskbarTAP PRIVATE
+    user32
     ole32
     oleaut32
     advapi32
@@ -28,6 +29,7 @@ target_link_libraries(AuroraTaskbarTAP PRIVATE
 
 set_target_properties(AuroraTaskbarTAP PROPERTIES
     OUTPUT_NAME "AuroraTaskbarTAP"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"

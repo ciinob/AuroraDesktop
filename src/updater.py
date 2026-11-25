@@ -16,13 +16,31 @@ from PySide6.QtCore import QObject, Signal
 RELEASES_API = "https://api.github.com/repos/ciinob/AuroraDesktop/releases/latest"
 RELEASES_PAGE = "https://github.com/ciinob/AuroraDesktop/releases/latest"
 
+_VERSION_RE = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?")
 
-def parse_version(tag: str) -> tuple[int, int, int]:
-    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag or "")
-    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+def parse_version(tag: str) -> tuple[int, int, int, int, tuple]:
+    """Parse a release tag into a sortable tuple.
+
+    Supports ``v1.2``, ``v1.2.3``, and prerelease suffixes like ``v1.2.3-beta.1``.
+    A final release sorts higher than a prerelease of the same version number.
+    """
+    m = _VERSION_RE.match(tag or "")
+    if not m:
+        return (0, 0, 0, 0, ())
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    patch = int(m.group(3) or 0)
+    pre = m.group(4)
+    if not pre:
+        return (major, minor, patch, 1, ())
+    pre_parts = tuple((0, int(p)) if p.isdigit() else (1, p.lower()) for p in pre.split("."))
+    return (major, minor, patch, 0, pre_parts)
 
 
 class UpdateChecker(QObject):
+    checkStarted = Signal()
+    checkFinished = Signal()
     updateFound = Signal(str, str)  # tag, release page url
     upToDate = Signal()
     checkFailed = Signal(str)
@@ -30,8 +48,15 @@ class UpdateChecker(QObject):
     def __init__(self, current_version: str, parent=None):
         super().__init__(parent)
         self.current_version = current_version
+        self._lock = threading.Lock()
+        self._checking = False
 
     def check(self):
+        with self._lock:
+            if self._checking:
+                return
+            self._checking = True
+        self.checkStarted.emit()
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
@@ -50,3 +75,7 @@ class UpdateChecker(QObject):
                 self.upToDate.emit()
         except Exception as exc:  # network errors must never disturb the desktop
             self.checkFailed.emit(str(exc))
+        finally:
+            with self._lock:
+                self._checking = False
+            self.checkFinished.emit()

@@ -784,13 +784,11 @@ class AuroraController(QObject):
 
         # Release check is user-triggered only (no background network traffic).
         self.update_checker = UpdateChecker(APP_VERSION, self)
+        self.update_checker.checkStarted.connect(self._on_update_check_started)
+        self.update_checker.checkFinished.connect(self._on_update_check_finished)
         self.update_checker.updateFound.connect(self._on_update_found)
-        self.update_checker.upToDate.connect(
-            lambda: QMessageBox.information(None, "Aurora Desktop", "已是最新版本 ✨")
-        )
-        self.update_checker.checkFailed.connect(
-            lambda err: QMessageBox.warning(None, "Aurora Desktop", f"检查更新失败：{err}")
-        )
+        self.update_checker.upToDate.connect(self._on_update_up_to_date)
+        self.update_checker.checkFailed.connect(self._on_update_check_failed)
 
         menu = QMenu()
         menu.setStyleSheet(MENU_QSS)
@@ -867,8 +865,8 @@ class AuroraController(QObject):
         act_autorun.setChecked(self._is_autorun_enabled())
         act_autorun.toggled.connect(self._toggle_autorun)
 
-        act_update = menu.addAction("🔄 检查更新")
-        act_update.triggered.connect(self.update_checker.check)
+        self.act_update = menu.addAction("🔄 检查更新")
+        self.act_update.triggered.connect(self.update_checker.check)
 
         menu.addSeparator()
         act_quit = menu.addAction("退出 AuroraDesktop")
@@ -878,15 +876,45 @@ class AuroraController(QObject):
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
+    def _on_update_check_started(self):
+        if hasattr(self, "act_update"):
+            self.act_update.setEnabled(False)
+            self.act_update.setText("⏳ 正在检查更新...")
+
+    def _on_update_check_finished(self):
+        if hasattr(self, "act_update"):
+            self.act_update.setEnabled(True)
+            self.act_update.setText("🔄 检查更新")
+
+    def _show_update_box(self, title: str, text: str, icon=QMessageBox.Information, ask_open: bool = False) -> bool:
+        box = QMessageBox()
+        box.setStyleSheet(DIALOG_QSS)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        if ask_open:
+            btn_yes = box.addButton("前往下载页", QMessageBox.AcceptRole)
+            box.addButton("稍后再说", QMessageBox.RejectRole)
+            box.exec()
+            return box.clickedButton() == btn_yes
+        box.addButton("知道了", QMessageBox.AcceptRole)
+        box.exec()
+        return False
+
     def _on_update_found(self, tag: str, url: str):
-        reply = QMessageBox.question(
-            None,
+        if self._show_update_box(
             "Aurora Desktop 更新",
-            f"发现新版本 {tag}，是否前往下载页？",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
+            f"发现新版本 {tag}（当前 v{APP_VERSION}），是否前往下载页？",
+            icon=QMessageBox.Information,
+            ask_open=True,
+        ):
             webbrowser.open(url)
+
+    def _on_update_up_to_date(self):
+        self._show_update_box("Aurora Desktop", f"当前 v{APP_VERSION} 已是最新版本 ✨")
+
+    def _on_update_check_failed(self, err: str):
+        self._show_update_box("Aurora Desktop", f"检查更新失败：{err}", icon=QMessageBox.Warning)
 
     def _on_lock_toggled(self, checked: bool):
         self.lock_positions = checked

@@ -6,7 +6,9 @@ source code itself is MIT-licensed (see `LICENSE`); each font keeps its own lice
 ## SIL Open Font License 1.1
 
 The font files below carry an OFL 1.1 notice in their `name` table (or a link to
-the OFL text). Full license text: <https://openfontlicense.org/>
+the OFL text). A full copy of the OFL 1.1 text is bundled in
+[`assets/fonts/OFL.txt`](assets/fonts/OFL.txt) (also available at
+<https://openfontlicense.org/>).
 
 | File | Family |
 | --- | --- |
@@ -29,9 +31,8 @@ license before doing so, or replace them with an OFL-licensed equivalent.
 
 | File | Family | Note |
 | --- | --- | --- |
-| `GeosansLight.ttf` | GeosansLight | unused fallback face |
 | `Ruthligos.ttf` | Ruthligos | used by the "手写艺术分层风" clock style |
 
 The OFL permits bundling and redistribution of the licensed fonts alongside an
-application, provided the license text and copyright notices are retained. A copy
-of the OFL 1.1 text is available at <https://openfontlicense.org/open-font-license-official-text/>.
+application, provided the license text and copyright notices are retained. See
+[`assets/fonts/OFL.txt`](assets/fonts/OFL.txt) for the full OFL 1.1 text.

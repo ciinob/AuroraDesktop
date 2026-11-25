@@ -32,11 +32,9 @@ def get_data_root() -> Path:
     """Persistent root for Groups, config.json, memo.txt and the icon cache.
 
     Priority:
-      1. Portable install: an existing config next to the exe (or a development
-         checkout) -- keeps older D:\\AuroraDesktop installs working unchanged.
-      2. A writable exe directory -- fresh portable download, data stays next
-         to the exe.
-      3. %APPDATA%\\AuroraDesktop -- only when the exe directory is read-only
+      1. Portable install: the exe directory (or repository root in dev mode),
+         whenever it already contains data or is writable.
+      2. %APPDATA%\\AuroraDesktop -- when the exe directory is read-only
          (e.g. installed under Program Files).
     """
     if getattr(sys, "frozen", False):
@@ -44,16 +42,7 @@ def get_data_root() -> Path:
     else:
         exe_dir = Path(__file__).resolve().parent.parent
 
-    if _has_existing_data(exe_dir):
-        return exe_dir
-
-    # Backwards compatibility for installs whose data lives in the historical
-    # hard-coded D:\AuroraDesktop while the exe was moved elsewhere.
-    legacy = Path(r"D:\AuroraDesktop")
-    if legacy != exe_dir and _has_existing_data(legacy):
-        return legacy
-
-    if _is_writable(exe_dir):
+    if _has_existing_data(exe_dir) or _is_writable(exe_dir):
         return exe_dir
 
     appdata = os.environ.get("APPDATA")
