@@ -86,8 +86,12 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 ## 📦 安装与使用
 
 1. 前往 [**Releases**](https://github.com/ciinob/AuroraDesktop/releases) 下载 `AuroraDesktop.exe`
-2. 双击运行，搞定。单文件免安装，首次启动自动登记开机自启
-3. 右键托盘图标：切换主题色温 / 玻璃通透度 / 时钟风格 / 速记便签
+2. 双击 `AuroraDesktop.exe` 即可打开 **极光桌面主控台**（同时挂载桌面胶囊、时钟与全透明任务栏）：
+   - **分组增删管理**：新建/重命名/删除分组、切换「折叠卡片 ↔ 横向胶囊栏」形态、上下排序
+   - **图标自定义**：为任意应用/文件夹替换 PNG / ICO / EXE 图标，实时预览自适应流光色晕
+   - **全局热键录制**：可视化按键录制（带热键冲突检测）与 **开机静默自启开关**
+   - **外观 · 时钟 · 任务栏**：4 套极光色温、3 档玻璃通透度、8 款艺术时钟与全透明任务栏模式
+3. 关闭主控台窗口后程序在桌面与托盘静默运行；**再次双击 exe、左键单击托盘图标、点左上角 AI 栏齿轮按钮，或按 `Alt + ,`** 均可随时唤出主控台。
 
 > 系统要求：Windows 11（24H2 已验证）
 >
@@ -96,9 +100,9 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 ## 🛠️ 从源码运行
 
 ```bash
-pip install -r requirements.txt   # PySide6 / pywin32
-python src/main.py                # dev_run.bat 一键调试
-rebuild_exe.bat                   # PyInstaller 打包并热替换运行中的 exe
+pip install -r requirements.txt   # PySide6 / pywin32 / pyinstaller / Pillow
+python src/main.py                # 或运行 scripts\dev_run.bat 一键调试
+scripts\rebuild_exe.bat           # PyInstaller 重新打包并热替换 exe
 ```
 
 ## 🧱 技术栈

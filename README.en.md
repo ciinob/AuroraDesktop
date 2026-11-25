@@ -86,8 +86,12 @@ A custom C++ native engine (`AuroraTaskbarTAP.dll`, combining XAML `BackgroundFi
 ## 📦 Install
 
 1. Grab `AuroraDesktop.exe` from [**Releases**](https://github.com/ciinob/AuroraDesktop/releases)
-2. Double-click to run — that's it. Single-file portable build; auto-start is registered on first launch
-3. Right-click the tray icon to switch theme temperature / glass opacity / clock style / quick memo
+2. Double-click `AuroraDesktop.exe` to open the **Aurora Control Center** (while mounting your desktop capsules, clock & transparent taskbar):
+   - **Capsule groups**: create, rename, switch card/bar layout, reorder, and delete groups
+   - **Custom icons**: override any item with PNG / ICO / EXE icons + live adaptive halo preview
+   - **Global hotkeys**: interactive shortcut recorder with conflict detection & **silent auto-start toggle**
+   - **Appearance, clock & taskbar**: 4 aurora palettes, 3 glass opacity levels, 8 clock styles & taskbar transparency
+3. Closing the Control Center leaves the desktop widgets running in the background; **re-opening the exe, left-clicking the tray icon, clicking the ⚙️ gear button on the top AI bar, or pressing `Alt + ,`** brings the Control Center right back.
 
 > Requirement: Windows 11 (verified on 24H2)
 >
@@ -96,9 +100,9 @@ A custom C++ native engine (`AuroraTaskbarTAP.dll`, combining XAML `BackgroundFi
 ## 🛠️ Run from Source
 
 ```bash
-pip install -r requirements.txt   # PySide6 / pywin32
-python src/main.py                # dev_run.bat for one-click debugging
-rebuild_exe.bat                   # PyInstaller build + hot-swap the running exe
+pip install -r requirements.txt   # PySide6 / pywin32 / pyinstaller / Pillow
+python src/main.py                # or scripts\dev_run.bat for debugging
+scripts\rebuild_exe.bat           # PyInstaller build + hot-swap exe
 ```
 
 ## 🧱 Tech Stack

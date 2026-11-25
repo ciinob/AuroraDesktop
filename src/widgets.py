@@ -442,6 +442,7 @@ def prompt_add_directory_to_folder(parent: QWidget, dest_folder: Path) -> bool:
 class AuroraIconTile(QWidget):
     """Minimalist icon tile with adaptive icon-color hover aura, click ripple ring, and drag-to-reorder."""
     moveRequested = Signal(Path, str)
+    customizeRequested = Signal(Path)
     hoverNameChanged = Signal(str)
 
     def __init__(
@@ -584,6 +585,8 @@ class AuroraIconTile(QWidget):
         act_loc = menu.addAction("打开文件所在位置")
         menu.addSeparator()
 
+        act_custom = menu.addAction("🖼️ 自定义图标 / 重命名...")
+
         move_menu = menu.addMenu("移至其他极光分区")
         move_menu.setStyleSheet(MENU_QSS)
         move_actions: dict[QAction, str] = {}
@@ -592,7 +595,6 @@ class AuroraIconTile(QWidget):
                 a = move_menu.addAction(g_title)
                 move_actions[a] = g_key
 
-        act_rename = menu.addAction("重命名显示名称...")
         menu.addSeparator()
         act_remove = menu.addAction("从此分区移除图标")
 
@@ -606,24 +608,10 @@ class AuroraIconTile(QWidget):
             launch_item(self.item_path, run_as_admin=True)
         elif chosen == act_loc:
             open_target_location(self.item_path, self.icon_loader)
+        elif chosen == act_custom:
+            self.customizeRequested.emit(self.item_path)
         elif chosen in move_actions:
             self.moveRequested.emit(self.item_path, move_actions[chosen])
-        elif chosen == act_rename:
-            dlg = QInputDialog()
-            dlg.setStyleSheet(DIALOG_QSS)
-            dlg.setWindowTitle("重命名")
-            dlg.setLabelText("请输入新的显示名称：")
-            dlg.setTextValue(self.short_name)
-            if dlg.exec() == QInputDialog.Accepted:
-                new_name = dlg.textValue().strip()
-                for ch in '<>:"/\\|?*':
-                    new_name = new_name.replace(ch, "")
-                if new_name:
-                    new_path = self.item_path.with_name(f"{new_name}{self.item_path.suffix}")
-                    if new_path != self.item_path and not new_path.exists():
-                        self.item_path.rename(new_path)
-                        if hasattr(parent_card, "reload_items"):
-                            parent_card.reload_items()
         elif chosen == act_remove:
             safe_remove_shortcut(self.item_path)
             if hasattr(parent_card, "reload_items"):
@@ -893,6 +881,7 @@ class AICapsuleBar(AuroraBaseWindow):
     contextActionTriggered = Signal(str)
     renameCapsuleRequested = Signal(str)
     deleteCapsuleRequested = Signal(str)
+    openSettingsRequested = Signal(str, object)
     spotlightRequested = Signal()
 
     CARD_WIDTH = 368
@@ -928,7 +917,9 @@ class AICapsuleBar(AuroraBaseWindow):
         self.all_groups = all_groups
         self._custom_order_provider = custom_order_provider or (lambda _: [])
         self._hover_search = False
-        self._search_rect = QRectF(self.CARD_WIDTH - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
+        self._hover_settings = False
+        self._search_rect = QRectF(self.CARD_WIDTH - 68.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
+        self._settings_rect = QRectF(self.CARD_WIDTH - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
 
         self.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
         self.setAcceptDrops(True)
@@ -936,10 +927,10 @@ class AICapsuleBar(AuroraBaseWindow):
         self._row_container = QWidget(self)
         self._row_container.setMouseTracking(True)
         self._row_layout = QHBoxLayout(self._row_container)
-        right_pad = 40 if show_search_pill else 10
-        self._row_layout.setContentsMargins(52, 7, right_pad, 7)
+        self._row_layout.setContentsMargins(0, 7, 0, 7)
         self._row_layout.setSpacing(1)
-        self._row_container.setGeometry(0, 0, self.CARD_WIDTH, self.CARD_HEIGHT)
+        init_right = 74 if show_search_pill else 12
+        self._row_container.setGeometry(52, 0, max(10, self.CARD_WIDTH - 52 - init_right), self.CARD_HEIGHT)
 
         self.reload_items()
 
@@ -952,11 +943,12 @@ class AICapsuleBar(AuroraBaseWindow):
         files = list_valid_partition_items(self.folder_path)
         files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
 
-        extra_right = 42 if self.show_search_pill else 12
+        extra_right = 74 if self.show_search_pill else 12
         needed_w = max(self.CARD_WIDTH, 54 + len(files) * 55 + extra_right)
         self.setFixedSize(needed_w, self.CARD_HEIGHT)
-        self._row_container.setGeometry(0, 0, needed_w, self.CARD_HEIGHT)
-        self._search_rect = QRectF(needed_w - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
+        self._row_container.setGeometry(52, 0, max(10, needed_w - 52 - extra_right), self.CARD_HEIGHT)
+        self._search_rect = QRectF(needed_w - 68.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
+        self._settings_rect = QRectF(needed_w - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
 
         for f in files:
             tile = AuroraIconTile(
@@ -968,6 +960,7 @@ class AICapsuleBar(AuroraBaseWindow):
                 parent=self._row_container,
             )
             tile.moveRequested.connect(self.itemMoveRequested.emit)
+            tile.customizeRequested.connect(lambda p: self.openSettingsRequested.emit("icons", p))
             self._row_layout.addWidget(tile)
 
         self._row_layout.addStretch(1)
@@ -979,6 +972,9 @@ class AICapsuleBar(AuroraBaseWindow):
             if self.show_search_pill and self._search_rect.contains(pos):
                 self.spotlightRequested.emit()
                 return
+            if self.show_search_pill and self._settings_rect.contains(pos):
+                self.openSettingsRequested.emit("general", None)
+                return
             if pos.x() < 52 and self._allow_drag_provider():
                 self._dragging = True
                 self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -986,10 +982,19 @@ class AICapsuleBar(AuroraBaseWindow):
 
     def mouseMoveEvent(self, event):
         pos = event.position()
-        was_hov = self._hover_search
+        was_hov_s = self._hover_search
+        was_hov_g = self._hover_settings
         self._hover_search = self.show_search_pill and self._search_rect.contains(pos)
-        if self._hover_search != was_hov:
-            self.setCursor(Qt.PointingHandCursor if self._hover_search else Qt.ArrowCursor)
+        self._hover_settings = self.show_search_pill and self._settings_rect.contains(pos)
+        if self._hover_search != was_hov_s or self._hover_settings != was_hov_g:
+            any_pill = self._hover_search or self._hover_settings
+            self.setCursor(Qt.PointingHandCursor if any_pill else Qt.ArrowCursor)
+            if self._hover_search:
+                self.setToolTip("极光全局搜索 (双击 Ctrl / Alt+S)")
+            elif self._hover_settings:
+                self.setToolTip("打开极光设置中心 (Alt+,)")
+            else:
+                self.setToolTip("")
             self.update()
 
         if self._dragging and (event.buttons() & Qt.LeftButton):
@@ -1008,30 +1013,16 @@ class AICapsuleBar(AuroraBaseWindow):
         self.set_menu_open(True)
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
-        act_search = menu.addAction("🔍 打开极光全局搜索 (双击 Ctrl / Alt+S)")
-        act_new_cap = menu.addAction("➕ 新建极光胶囊分区...")
-        act_memo = menu.addAction("📝 显示 / 隐藏极光速记便签")
+        act_add = menu.addAction("➕ 添加应用 / 文件...")
+        act_add_dir = menu.addAction("📁 添加文件夹...")
+        act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
         menu.addSeparator()
-        act_add = menu.addAction("添加文件 / 图片 / PDF / 应用...")
-        act_add_dir = menu.addAction("添加文件夹到此栏...")
-        act_folder = menu.addAction(f"打开映射文件夹 ({self.folder_path.name})")
-        act_refresh = menu.addAction("刷新分区图标")
-        menu.addSeparator()
-        act_rename_cap = menu.addAction("重命名此胶囊徽标...")
-        act_del_cap = menu.addAction("删除此极光胶囊...")
-        menu.addSeparator()
-        act_reset = menu.addAction("重置左侧山体黄金布局")
-        act_hide = menu.addAction("淡出隐藏全部卡片 (双击桌面恢复)")
+        act_settings = menu.addAction("⚙️ 管理此分组 / 打开设置中心...")
+        act_hide = menu.addAction("🙈 隐藏全部桌面卡片")
 
         chosen = menu.exec(event.globalPos())
         self.set_menu_open(False)
-        if chosen == act_search:
-            self.spotlightRequested.emit()
-        elif chosen == act_new_cap:
-            self.contextActionTriggered.emit("create_capsule")
-        elif chosen == act_memo:
-            self.contextActionTriggered.emit("toggle_memo")
-        elif chosen == act_add:
+        if chosen == act_add:
             if prompt_add_items_to_folder(self, self.folder_path):
                 self.reload_items()
         elif chosen == act_add_dir:
@@ -1039,14 +1030,8 @@ class AICapsuleBar(AuroraBaseWindow):
                 self.reload_items()
         elif chosen == act_folder:
             subprocess.Popen(["explorer.exe", str(self.folder_path)])
-        elif chosen == act_refresh:
-            self.reload_items()
-        elif chosen == act_rename_cap:
-            self.renameCapsuleRequested.emit(self.group_key)
-        elif chosen == act_del_cap:
-            self.deleteCapsuleRequested.emit(self.group_key)
-        elif chosen == act_reset:
-            self.contextActionTriggered.emit("reset_layout")
+        elif chosen == act_settings:
+            self.openSettingsRequested.emit("groups", self.group_key)
         elif chosen == act_hide:
             self.contextActionTriggered.emit("toggle_visibility")
 
@@ -1109,8 +1094,9 @@ class AICapsuleBar(AuroraBaseWindow):
         painter.setPen(QPen(QColor(255, 255, 255, 24), 1.0))
         painter.drawLine(QPointF(49.5, 15.0), QPointF(49.5, self.height() - 15.0))
 
-        # Right-side sleek Spotlight Search trigger pill
+        # Right-side sleek Spotlight Search & Settings trigger pills
         if self.show_search_pill:
+            # 1) Search pill
             sr = self._search_rect
             s_alpha = 46 if self._hover_search else int(16 + 18 * self._border_glow)
             painter.setBrush(QColor(255, 255, 255, s_alpha))
@@ -1120,7 +1106,6 @@ class AICapsuleBar(AuroraBaseWindow):
             painter.setPen(QPen(s_border, 1.0))
             painter.drawRoundedRect(sr, 8.0, 8.0)
 
-            # Vector magnifying glass icon inside pill
             cx, cy = sr.center().x() - 1.2, sr.center().y() - 1.2
             icon_col = QColor(255, 255, 255, 245 if self._hover_search else 185)
             pen = QPen(icon_col, 1.6)
@@ -1129,6 +1114,31 @@ class AICapsuleBar(AuroraBaseWindow):
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QPointF(cx, cy), 4.6, 4.6)
             painter.drawLine(QPointF(cx + 3.4, cy + 3.4), QPointF(cx + 6.8, cy + 6.8))
+
+            # 2) Settings gear pill (one-click direct entry on desktop!)
+            gr = self._settings_rect
+            g_alpha = 46 if self._hover_settings else int(16 + 18 * self._border_glow)
+            painter.setBrush(QColor(255, 255, 255, g_alpha))
+            g_border = QColor(c1) if self._hover_settings else QColor(255, 255, 255, 32)
+            if self._hover_settings:
+                g_border.setAlpha(155)
+            painter.setPen(QPen(g_border, 1.0))
+            painter.drawRoundedRect(gr, 8.0, 8.0)
+
+            gcx, gcy = gr.center().x(), gr.center().y()
+            g_col = QColor(255, 255, 255, 245 if self._hover_settings else 185)
+            g_pen = QPen(g_col, 1.5)
+            g_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(g_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(gcx, gcy), 3.3, 3.3)
+            for i in range(6):
+                ang = i * (math.pi / 3.0)
+                x1 = gcx + math.cos(ang) * 4.2
+                y1 = gcy + math.sin(ang) * 4.2
+                x2 = gcx + math.cos(ang) * 6.2
+                y2 = gcy + math.sin(ang) * 6.2
+                painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
 
 class CollapsibleAuroraCard(AuroraBaseWindow):
@@ -1140,6 +1150,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
     contextActionTriggered = Signal(str)
     renameCapsuleRequested = Signal(str)
     deleteCapsuleRequested = Signal(str)
+    openSettingsRequested = Signal(str, object)
     spotlightRequested = Signal()
 
     CARD_WIDTH = 368
@@ -1244,6 +1255,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             tile.move(x, y)
             tile.show()
             tile.moveRequested.connect(self.itemMoveRequested.emit)
+            tile.customizeRequested.connect(lambda p: self.openSettingsRequested.emit("icons", p))
             tile.hoverNameChanged.connect(self._on_tile_hovered)
 
         self._grid_snapshot = None
@@ -1400,32 +1412,21 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
-        act_search = menu.addAction("🔍 极光全局搜索 (双击 Ctrl / Alt+S)")
-        pin_label = "取消常驻展开 (恢复 0.5s 自动卷起)" if self.pinned else "常驻展开此卡片 (不自动卷起)"
+        pin_label = "📌 取消常驻展开 (自动卷起)" if self.pinned else "📌 常驻展开此卡片"
         act_pin = menu.addAction(pin_label)
         act_toggle = menu.addAction("立即卷起为胶囊" if self._expanded else "展开卡片")
         menu.addSeparator()
-        act_new_cap = menu.addAction("➕ 新建极光胶囊分区...")
-        act_memo = menu.addAction("📝 显示 / 隐藏极光速记便签")
-        act_add = menu.addAction("添加文件 / 图片 / PDF / 应用...")
-        act_add_dir = menu.addAction("添加文件夹到此分区...")
-        act_folder = menu.addAction(f"打开映射文件夹 ({self.folder_path.name})")
-        act_refresh = menu.addAction("刷新分区图标")
+        act_add = menu.addAction("➕ 添加应用 / 文件...")
+        act_add_dir = menu.addAction("📁 添加文件夹...")
+        act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
         menu.addSeparator()
-        act_rename_cap = menu.addAction("重命名此胶囊标题...")
-        act_del_cap = menu.addAction("删除此极光胶囊...")
-        menu.addSeparator()
-        act_expand_all = menu.addAction("全部展开并常驻")
-        act_auto_all = menu.addAction("全部开启 0.5s 自动卷起")
-        act_reset = menu.addAction("重置左侧山体黄金布局")
-        act_hide = menu.addAction("淡出隐藏全部卡片 (双击桌面恢复)")
+        act_settings = menu.addAction("⚙️ 管理此分组 / 打开设置中心...")
+        act_hide = menu.addAction("🙈 隐藏全部桌面卡片")
 
         chosen = menu.exec(event.globalPos())
         self.set_menu_open(False)
 
-        if chosen == act_search:
-            self.spotlightRequested.emit()
-        elif chosen == act_pin:
+        if chosen == act_pin:
             self.pinned = not self.pinned
             self.pinToggled.emit(self.group_key, self.pinned)
             self.update()
@@ -1434,10 +1435,6 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 self.collapse_card(force=True)
             else:
                 self.expand_card()
-        elif chosen == act_new_cap:
-            self.contextActionTriggered.emit("create_capsule")
-        elif chosen == act_memo:
-            self.contextActionTriggered.emit("toggle_memo")
         elif chosen == act_add:
             if prompt_add_items_to_folder(self, self.folder_path):
                 self.reload_items()
@@ -1446,18 +1443,8 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 self.reload_items()
         elif chosen == act_folder:
             subprocess.Popen(["explorer.exe", str(self.folder_path)])
-        elif chosen == act_refresh:
-            self.reload_items()
-        elif chosen == act_rename_cap:
-            self.renameCapsuleRequested.emit(self.group_key)
-        elif chosen == act_del_cap:
-            self.deleteCapsuleRequested.emit(self.group_key)
-        elif chosen == act_expand_all:
-            self.contextActionTriggered.emit("pin_all")
-        elif chosen == act_auto_all:
-            self.contextActionTriggered.emit("unpin_all")
-        elif chosen == act_reset:
-            self.contextActionTriggered.emit("reset_layout")
+        elif chosen == act_settings:
+            self.openSettingsRequested.emit("groups", self.group_key)
         elif chosen == act_hide:
             self.contextActionTriggered.emit("toggle_visibility")
 

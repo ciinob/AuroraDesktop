@@ -1,7 +1,6 @@
 @echo off
 chcp 65001 >nul
-set "ROOT=%~dp0"
-if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 cd /d "%ROOT%"
 echo ========================================================
 echo   AuroraDesktop 一键重新打包并热替换脚本
@@ -13,12 +12,11 @@ python -m PyInstaller ^
     --windowed ^
     --name "AuroraDesktop" ^
     --distpath "%ROOT%\build\dist" ^
-    --workpath "%ROOT%\build" ^
-    --specpath "%ROOT%\build" ^
+    --workpath "%ROOT%\build\pyi" ^
+    --specpath "%ROOT%\build\pyi" ^
     --icon "%ROOT%\assets\aurora.ico" ^
     --add-data "%ROOT%\assets;assets" ^
     --paths "%ROOT%\src" ^
-    --paths "%ROOT%" ^
     --hidden-import "win32com.client" ^
     --hidden-import "pythoncom" ^
     --hidden-import "pywintypes" ^
@@ -42,12 +40,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/3] 正在关闭旧版进程并替换 AuroraDesktop.exe ...
+echo [2/3] 正在关闭旧版进程、更新 AuroraDesktop.exe 并清理构建缓存 ...
 taskkill /F /IM AuroraDesktop.exe /T >nul 2>&1
 timeout /t 1 /nobreak >nul
 copy /Y "%ROOT%\build\dist\AuroraDesktop.exe" "%ROOT%\AuroraDesktop.exe" >nul
+rmdir /S /Q "%ROOT%\build" >nul 2>&1
 
-echo [3/3] 正在重新启动最新版 AuroraDesktop.exe ...
+echo [3/3] 正在启动最新版 AuroraDesktop.exe ...
 start "" "%ROOT%\AuroraDesktop.exe"
 echo [完成] 热更新成功！
 timeout /t 2 >nul

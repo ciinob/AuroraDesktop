@@ -188,6 +188,7 @@ class AuroraClockWidget(QWidget):
     ticking (near-zero idle CPU), cross-fade style switching and a hover glass affordance.
     """
     configChanged = Signal()
+    openSettingsRequested = Signal()
 
     BASE_W = 360
     BASE_H = 165
@@ -391,13 +392,7 @@ class AuroraClockWidget(QWidget):
         menu = parent_menu or QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
-        act_vis = menu.addAction("启用右上角极简桌面时钟")
-        act_vis.setCheckable(True)
-        act_vis.setChecked(bool(self.cfg.get("enabled", True)))
-        act_vis.toggled.connect(self._set_enabled)
-
-        menu.addSeparator()
-        style_menu = menu.addMenu("🎨 时钟高定字体风格")
+        style_menu = menu.addMenu("🎨 切换时钟字体风格")
         style_menu.setStyleSheet(MENU_QSS)
         cur_style = self.cfg.get("style", "nordic_modern")
         grp_s = QActionGroup(menu)
@@ -408,40 +403,20 @@ class AuroraClockWidget(QWidget):
             grp_s.addAction(a)
             a.triggered.connect(lambda checked=False, k=s_key: self._set_style(k))
 
-        scale_menu = menu.addMenu("🔍 时钟尺寸比例")
-        scale_menu.setStyleSheet(MENU_QSS)
-        cur_sc = round(float(self.cfg.get("scale", 1.0)), 2)
-        grp_sc = QActionGroup(menu)
-        for sc_val, sc_lbl in [(0.85, "精致小巧 (85%)"), (1.0, "黄金标准 (100%)"), (1.15, "舒展大气 (115%)"), (1.30, "巨幕醒目 (130%)"), (1.5, "殿堂巨幅 (150%)")]:
-            a = scale_menu.addAction(sc_lbl)
-            a.setCheckable(True)
-            a.setChecked(abs(cur_sc - sc_val) < 0.03)
-            grp_sc.addAction(a)
-            a.triggered.connect(lambda checked=False, v=sc_val: self._set_scale(v))
-
-        menu.addSeparator()
-        act_24h = menu.addAction("使用 24 小时制")
-        act_24h.setCheckable(True)
-        act_24h.setChecked(bool(self.cfg.get("use_24h", True)))
-        act_24h.toggled.connect(self._set_24h)
-
-        act_sec = menu.addAction("显示秒数 (:SS)")
-        act_sec.setCheckable(True)
-        act_sec.setChecked(bool(self.cfg.get("show_seconds", False)))
-        act_sec.toggled.connect(self._set_seconds)
-
-        act_lock = menu.addAction("锁定时钟位置")
+        act_lock = menu.addAction("🔒 锁定时钟位置")
         act_lock.setCheckable(True)
         act_lock.setChecked(bool(self.cfg.get("locked", False)))
         act_lock.toggled.connect(self._set_locked)
 
-        act_ct = menu.addAction("鼠标点击穿透 (Click-Through)")
-        act_ct.setCheckable(True)
-        act_ct.setChecked(bool(self.cfg.get("click_through", False)))
-        act_ct.toggled.connect(self._set_click_through)
-
-        act_reset_pos = menu.addAction("重置回右上角黄金位置")
+        act_reset_pos = menu.addAction("重置回右上角")
         act_reset_pos.triggered.connect(self._reset_top_right)
+
+        menu.addSeparator()
+        act_settings = menu.addAction("⚙️ 更多时钟与外观设置...")
+        act_settings.triggered.connect(self.openSettingsRequested.emit)
+
+        act_hide = menu.addAction("隐藏桌面时钟")
+        act_hide.triggered.connect(lambda: self._set_enabled(False))
 
         return menu
 

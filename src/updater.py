@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Lightweight GitHub release check for the tray menu.
+"""Lightweight GitHub release check with zero-rate-limit fallback.
 
-Uses only the standard library: QtNetwork is deliberately excluded from the
-PyInstaller build, and the request runs on a worker thread so the UI never
-blocks. Signals are delivered to the main thread via Qt's auto connection.
+Tries the GitHub REST API first, and if rate-limited (HTTP 403/429 on shared/proxy
+IPs) automatically falls back to resolving the HTTP redirect of `/releases/latest`
+to `/releases/tag/vX.Y.Z`, which has no API rate limit.
 """
 import json
 import re
 import threading
+import urllib.error
 import urllib.request
 
 from PySide6.QtCore import QObject, Signal
@@ -20,11 +21,7 @@ _VERSION_RE = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?"
 
 
 def parse_version(tag: str) -> tuple[int, int, int, int, tuple]:
-    """Parse a release tag into a sortable tuple.
-
-    Supports ``v1.2``, ``v1.2.3``, and prerelease suffixes like ``v1.2.3-beta.1``.
-    A final release sorts higher than a prerelease of the same version number.
-    """
+    """Parse a release tag into a sortable tuple."""
     m = _VERSION_RE.match(tag or "")
     if not m:
         return (0, 0, 0, 0, ())
@@ -36,6 +33,38 @@ def parse_version(tag: str) -> tuple[int, int, int, int, tuple]:
         return (major, minor, patch, 1, ())
     pre_parts = tuple((0, int(p)) if p.isdigit() else (1, p.lower()) for p in pre.split("."))
     return (major, minor, patch, 0, pre_parts)
+
+
+def _fetch_latest_release() -> tuple[str, str]:
+    """Return (tag_name, html_url) via GitHub API, falling back to web redirect on 403/429."""
+    try:
+        req = urllib.request.Request(
+            RELEASES_API,
+            headers={"User-Agent": "AuroraDesktop", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.load(resp)
+        tag = (data.get("tag_name") or "").strip()
+        url = (data.get("html_url") or RELEASES_PAGE).strip()
+        if tag:
+            return tag, url
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403, 429):
+            raise
+    except Exception:
+        pass
+
+    # Fallback: GitHub web `/releases/latest` 302-redirects to `/releases/tag/<tag>` without API rate limits
+    req_web = urllib.request.Request(
+        RELEASES_PAGE,
+        headers={"User-Agent": "Mozilla/5.0 AuroraDesktop"},
+    )
+    with urllib.request.urlopen(req_web, timeout=8) as resp:
+        final_url = resp.geturl() or RELEASES_PAGE
+    if "/releases/tag/" in final_url:
+        tag = final_url.rsplit("/releases/tag/", 1)[1].split("?", 1)[0].strip("/")
+        return tag, final_url
+    return "", final_url
 
 
 class UpdateChecker(QObject):
@@ -61,19 +90,12 @@ class UpdateChecker(QObject):
 
     def _worker(self):
         try:
-            req = urllib.request.Request(
-                RELEASES_API,
-                headers={"User-Agent": "AuroraDesktop", "Accept": "application/vnd.github+json"},
-            )
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                data = json.load(resp)
-            tag = data.get("tag_name", "")
-            url = data.get("html_url") or RELEASES_PAGE
-            if parse_version(tag) > parse_version(self.current_version):
+            tag, url = _fetch_latest_release()
+            if tag and parse_version(tag) > parse_version(self.current_version):
                 self.updateFound.emit(tag, url)
             else:
                 self.upToDate.emit()
-        except Exception as exc:  # network errors must never disturb the desktop
+        except Exception as exc:
             self.checkFailed.emit(str(exc))
         finally:
             with self._lock:

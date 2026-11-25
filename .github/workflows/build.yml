@@ -27,10 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Verify Python sources
+        run: |
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('src').glob('*.py')]"
+
       - name: Build native taskbar DLL
         shell: pwsh
         run: |
-          cmake -S src/native -B build/native -G "Visual Studio 17 2022" -A x64
+          cmake -S src/native -B build/native -A x64
           cmake --build build/native --config Release
           Copy-Item -Force build/native/out/Release/AuroraTaskbarTAP.dll assets/AuroraTaskbarTAP.dll
 
@@ -39,7 +43,7 @@ jobs:
           python -m PyInstaller --noconfirm --onefile --windowed --name AuroraDesktop `
             --distpath dist --workpath build/pyi --specpath build/pyi `
             --icon "$PWD/assets/aurora.ico" --add-data "$PWD/assets;assets" `
-            --paths src --paths . `
+            --paths src `
             --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes `
             --exclude-module PySide6.QtWebEngineCore `
             --exclude-module PySide6.QtWebEngineWidgets `

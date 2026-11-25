@@ -274,6 +274,7 @@ class AuroraSpotlightOverlay(QWidget):
         open_loc_callback,
         font_maker,
         theme_provider,
+        settings_callback=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -283,6 +284,7 @@ class AuroraSpotlightOverlay(QWidget):
         self._open_loc_cb = open_loc_callback
         self._make_font = font_maker
         self._theme_provider = theme_provider
+        self._settings_cb = settings_callback
 
         self._acrylic_ready = False
         self._start_menu_cache: list[tuple[str, Path]] = []
@@ -512,8 +514,20 @@ class AuroraSpotlightOverlay(QWidget):
                         )
                     )
 
-            # 4. Built-in quick system commands
+            # 4. Built-in quick system commands & Settings Center
             ql = q.lower()
+            set_sc = fuzzy_match_score(q, "极光设置中心 Settings", "shezhi sz 分组 图标 热键 开机自启 外观 时钟 任务栏 偏好")
+            if set_sc > 0 and self._settings_cb is not None:
+                results.append(
+                    SearchEntry(
+                        title="⚙️ 打开极光设置中心 (Aurora Settings)",
+                        subtitle="集中管理胶囊分组、自定义图标、全局热键、开机自启与外观",
+                        badge="设置中心",
+                        action_type="cmd",
+                        payload="open_settings",
+                        score=set_sc + 260,
+                    )
+                )
             if ql in ("ip", "ipv4", "网络"):
                 try:
                     ip = socket.gethostbyname(socket.gethostname())
@@ -579,6 +593,8 @@ class AuroraSpotlightOverlay(QWidget):
         elif entry.action_type == "cmd":
             if entry.payload == "lock":
                 subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+            elif entry.payload == "open_settings" and self._settings_cb is not None:
+                self._settings_cb()
 
     def paintEvent(self, event):
         painter = QPainter(self)

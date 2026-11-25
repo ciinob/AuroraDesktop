@@ -9,18 +9,18 @@ import webbrowser
 import winreg
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Qt
-from PySide6.QtGui import QAction, QActionGroup, QFontDatabase, QGuiApplication, QIcon
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Qt, Signal
+from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from clock_widget import AuroraClockWidget
-from icon_extractor import ShortcutIconLoader
+from icon_extractor import ShortcutIconLoader, item_rel_key
 from memo_card import AuroraMemoCard
 from organize_shortcuts import scan_and_organize
 from paths import APP_VERSION, CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
+from settings_dialog import AuroraSettingsWindow
 from spotlight import AuroraSpotlightOverlay
 from taskbar_engine import TaskbarTransparencyEngine, import_existing_ttb_config
 from updater import UpdateChecker
@@ -34,32 +34,45 @@ from widgets import (
     MENU_QSS,
     NewCapsuleDialog,
     launch_item,
+    list_valid_partition_items,
     make_apple_font,
     open_target_location,
+    prompt_add_directory_to_folder,
+    prompt_add_items_to_folder,
     safe_remove_shortcut,
+    sort_group_items,
 )
 from win32_utils import (
+    ASFW_ANY,
     DesktopDoubleClickWatcher,
     DoubleCtrlWatcher,
     HWND_BROADCAST,
-    MOD_ALT,
     MOD_NOREPEAT,
-    VK_OEM_3,
-    VK_S,
+    WM_AURORA_OPEN_PANEL,
     WM_AURORA_SHOW,
     WM_HOTKEY,
     batch_defer_window_rects,
+    format_hotkey_label,
     get_current_desktop_name,
+    parse_hotkey_spec,
     send_to_bottom,
     user32,
 )
 
 HOTKEY_ID_TOGGLE = 0xA001
 HOTKEY_ID_SPOTLIGHT = 0xA002
+HOTKEY_ID_SETTINGS = 0xA003
 AUTORUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STARTUP_APPROVED_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTORUN_KEY_NAME = "AuroraDesktop"
 WM_TASKBAR_CREATED = user32.RegisterWindowMessageW("TaskbarCreated")
+
+DEFAULT_HOTKEYS = {
+    "double_ctrl_spotlight": True,
+    "spotlight": "Alt+S",
+    "toggle_cards": "Alt+~",
+    "settings": "Alt+,",
+}
 
 DEFAULT_PARTITIONS = [
     {"key": "AI_CAPSULE", "title": "AI 悬浮胶囊栏", "folder": "01_AI_CAPSULE", "kind": "bar", "badge": "AI"},
@@ -70,19 +83,44 @@ DEFAULT_PARTITIONS = [
 
 
 class HotkeyReceiver(QWidget):
-    """Hidden Win32 message receiver for global hotkeys (Alt+~, Alt+S), re-launch, and Explorer restarts."""
+    """Hidden Win32 message receiver for configurable global hotkeys, single-instance wakeup, and Explorer restarts."""
 
-    def __init__(self, on_toggle_vis, on_spotlight, on_force_show, on_explorer_restarted):
+    def __init__(self, on_toggle_vis, on_spotlight, on_open_settings, on_force_show, on_explorer_restarted):
         super().__init__()
         self._on_toggle_vis = on_toggle_vis
         self._on_spotlight = on_spotlight
+        self._on_open_settings = on_open_settings
         self._on_force_show = on_force_show
         self._on_explorer_restarted = on_explorer_restarted
+        self._registered_ids: set[int] = set()
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.resize(1, 1)
+
+    def apply_hotkeys(self, toggle_spec: str, spotlight_spec: str, settings_spec: str) -> dict[str, bool]:
         hwnd = int(self.winId())
-        user32.RegisterHotKey(hwnd, HOTKEY_ID_TOGGLE, MOD_ALT | MOD_NOREPEAT, VK_OEM_3)
-        user32.RegisterHotKey(hwnd, HOTKEY_ID_SPOTLIGHT, MOD_ALT | MOD_NOREPEAT, VK_S)
+        for hk_id in list(self._registered_ids):
+            user32.UnregisterHotKey(hwnd, hk_id)
+        self._registered_ids.clear()
+
+        results: dict[str, bool] = {}
+        for slot, hk_id, spec in [
+            ("toggle_cards", HOTKEY_ID_TOGGLE, toggle_spec),
+            ("spotlight", HOTKEY_ID_SPOTLIGHT, spotlight_spec),
+            ("settings", HOTKEY_ID_SETTINGS, settings_spec),
+        ]:
+            if not spec or not spec.strip():
+                results[slot] = True
+                continue
+            parsed = parse_hotkey_spec(spec)
+            if not parsed:
+                results[slot] = False
+                continue
+            mods, vk = parsed
+            ok = bool(user32.RegisterHotKey(hwnd, hk_id, mods | MOD_NOREPEAT, vk))
+            if ok:
+                self._registered_ids.add(hk_id)
+            results[slot] = ok
+        return results
 
     def nativeEvent(self, eventType, message):
         if eventType == b"windows_generic_MSG" or eventType == "windows_generic_MSG":
@@ -94,6 +132,12 @@ class HotkeyReceiver(QWidget):
                 if msg.wParam == HOTKEY_ID_SPOTLIGHT:
                     self._on_spotlight()
                     return True, 0
+                if msg.wParam == HOTKEY_ID_SETTINGS:
+                    self._on_open_settings()
+                    return True, 0
+            elif WM_AURORA_OPEN_PANEL and msg.message == WM_AURORA_OPEN_PANEL:
+                self._on_open_settings()
+                return True, 0
             elif WM_AURORA_SHOW and msg.message == WM_AURORA_SHOW:
                 self._on_force_show()
                 return True, 0
@@ -104,12 +148,15 @@ class HotkeyReceiver(QWidget):
 
     def cleanup(self):
         hwnd = int(self.winId())
-        user32.UnregisterHotKey(hwnd, HOTKEY_ID_TOGGLE)
-        user32.UnregisterHotKey(hwnd, HOTKEY_ID_SPOTLIGHT)
+        for hk_id in list(self._registered_ids):
+            user32.UnregisterHotKey(hwnd, hk_id)
+        self._registered_ids.clear()
 
 
 class AuroraController(QObject):
-    """Flagship v2.0 Controller: Spotlight search, Quick Memo, Themes, Drag-Reorder, and Desktop Stealth."""
+    """Flagship Controller: Settings Center, Custom Icons, Configurable Hotkeys, Spotlight, Clock & Taskbar."""
+
+    stateChanged = Signal()
 
     LEFT_MARGIN = 24
     TOP_MARGIN = 24
@@ -117,12 +164,14 @@ class AuroraController(QObject):
     COL_GAP = 14
     CARD_W = 368
 
-    def __init__(self, app: QApplication):
+    def __init__(self, app: QApplication, open_panel_on_start: bool = True):
         super().__init__()
         self.app = app
+        self._open_panel_on_start = open_panel_on_start
         self.config = self._load_config()
         self.visible_state = True
         self.lock_positions = bool(self.config.get("lock_positions", False))
+        self.double_click_hide = bool(self.config.get("double_click_hide", True))
         self.theme_key = self.config.get("theme", "aurora")
         if self.theme_key not in AURORA_THEMES:
             self.theme_key = "aurora"
@@ -133,7 +182,13 @@ class AuroraController(QObject):
         self.show_memo = bool(self.config.get("show_memo", False))
         self.memo_pinned = bool(self.config.get("memo_pinned", True))
         self.item_orders: dict[str, list[str]] = dict(self.config.get("item_orders", {}))
+        self.custom_icons: dict[str, str] = {
+            k.lower(): v for k, v in dict(self.config.get("custom_icons", {})).items()
+        }
         self.dragged_keys: set[str] = set(self.config.get("dragged_keys", []))
+        self.hotkeys_cfg: dict = {**DEFAULT_HOTKEYS, **dict(self.config.get("hotkeys", {}))}
+        self.hotkey_status: dict[str, bool] = {"spotlight": True, "toggle_cards": True, "settings": True}
+        self.settings_win: AuroraSettingsWindow | None = None
 
         GROUPS_DIR.mkdir(parents=True, exist_ok=True)
         if not any(GROUPS_DIR.rglob("*.lnk")):
@@ -144,13 +199,12 @@ class AuroraController(QObject):
         self._rebuild_groups_meta()
 
         if FONTS_DIR.exists():
-            # Register every bundled typeface (Inter / Outfit / Cormorant / Playfair / Great Vibes / Allura / Ruthligos ...)
             for fp in sorted(list(FONTS_DIR.glob("*.ttf")) + list(FONTS_DIR.glob("*.otf"))):
                 QFontDatabase.addApplicationFont(str(fp))
         self.header_font_family = "Inter"
-        self.icon_loader = ShortcutIconLoader()
+        self.icon_loader = ShortcutIconLoader(self.custom_icons)
 
-        # 1. Native Desktop Clock (Luxury Nordic / Editorial / Sonoma minimalist clock)
+        # 1. Native Desktop Clock
         default_clock_cfg = {
             "enabled": True,
             "style": "nordic_modern",
@@ -159,8 +213,6 @@ class AuroraController(QObject):
             "scale": 1.0,
             "locked": False,
             "click_through": False,
-            # None -> the widget centres on the top-right of the primary screen
-            # at runtime, instead of assuming a 2560px-wide monitor.
             "x": None,
             "y": None,
         }
@@ -169,15 +221,16 @@ class AuroraController(QObject):
             clock_cfg=self.clock_cfg,
             theme_provider=self.get_current_theme_colors,
         )
-        self.clock_widget.configChanged.connect(self._save_config)
+        self.clock_widget.configChanged.connect(self._on_subcomponent_changed)
+        self.clock_widget.openSettingsRequested.connect(lambda: self.open_settings("appearance"))
 
-        # 2. Native Dual-Core Taskbar Transparency Engine (Fused & Synced from TranslucentTB!)
+        # 2. Native Dual-Core Taskbar Transparency Engine
         if "taskbar" in self.config and isinstance(self.config["taskbar"], dict):
             self.taskbar_cfg = self.config["taskbar"]
         else:
             self.taskbar_cfg = import_existing_ttb_config()
         self.taskbar_engine = TaskbarTransparencyEngine(self.taskbar_cfg, self)
-        self.taskbar_engine.configChanged.connect(self._save_config)
+        self.taskbar_engine.configChanged.connect(self._on_subcomponent_changed)
 
         self.windows: list[AuroraBaseWindow] = []
         self.memo_card: AuroraMemoCard | None = None
@@ -193,6 +246,7 @@ class AuroraController(QObject):
             open_loc_callback=lambda p: open_target_location(p, self.icon_loader),
             font_maker=make_apple_font,
             theme_provider=self.get_current_theme_colors,
+            settings_callback=lambda: self.open_settings("general"),
         )
 
         # Watch mapping folders for live updates
@@ -207,19 +261,27 @@ class AuroraController(QObject):
         # Desktop blank double-click stealth watcher
         self.dbl_watcher = DesktopDoubleClickWatcher(self.get_all_hwnds, self)
         self.dbl_watcher.desktopDoubleClicked.connect(self.toggle_all_visibility)
-        self.dbl_watcher.start()
+        if self.double_click_hide:
+            self.dbl_watcher.start()
 
         # Double-Tap Ctrl Spotlight trigger watcher
         self.ctrl_watcher = DoubleCtrlWatcher(self)
         self.ctrl_watcher.doubleCtrlPressed.connect(self.spotlight.toggle_spotlight)
-        self.ctrl_watcher.start()
+        if self.hotkeys_cfg.get("double_ctrl_spotlight", True):
+            self.ctrl_watcher.start()
 
-        # Global hotkeys (Alt + ~ for stealth, Alt + S for Spotlight) + Explorer restart recovery
+        # Configurable global hotkeys + Explorer restart recovery
         self.hotkey_receiver = HotkeyReceiver(
             self.toggle_all_visibility,
             self.spotlight.toggle_spotlight,
+            lambda: self.open_settings("general"),
             self.force_show_and_showcase,
             self._on_explorer_restarted,
+        )
+        self.hotkey_status = self.hotkey_receiver.apply_hotkeys(
+            self.hotkeys_cfg.get("toggle_cards", ""),
+            self.hotkeys_cfg.get("spotlight", ""),
+            self.hotkeys_cfg.get("settings", ""),
         )
 
         # Periodic light z-order guard + cold-boot shell readiness re-pin
@@ -238,9 +300,18 @@ class AuroraController(QObject):
         if self.clock_cfg.get("enabled", True):
             self.clock_widget.show()
 
-        # Persist synced Rainmeter & TranslucentTB settings on startup
+        # Ensure existing autorun entry uses --autostart so Windows boot stays silent
+        if self.is_autorun_enabled():
+            self._write_autorun_registry(True)
+
         self._save_config()
         QTimer.singleShot(3500, self._initial_auto_collapse)
+        if self._open_panel_on_start:
+            QTimer.singleShot(120, lambda: self.open_settings("general"))
+
+    def _on_subcomponent_changed(self):
+        self._save_config()
+        self.stateChanged.emit()
 
     @property
     def ai_bar(self):
@@ -343,10 +414,19 @@ class AuroraController(QObject):
         win.contextActionTriggered.connect(self.handle_context_action)
         win.renameCapsuleRequested.connect(self.rename_capsule_dialog)
         win.deleteCapsuleRequested.connect(self.delete_capsule_dialog)
+        win.openSettingsRequested.connect(self.open_settings)
         win.positionChangedByUser.connect(lambda k=g_key: self._on_user_dragged(k))
         return win
 
     def _build_all_windows(self):
+        # Snapshot current pin state so rebuilding windows preserves runtime toggles
+        if self.windows:
+            pinned_now = dict(self.config.get("pinned", {}))
+            for w in self.windows:
+                if isinstance(w, CollapsibleAuroraCard):
+                    pinned_now[w.group_key] = w.pinned
+            self.config["pinned"] = pinned_now
+
         for w in self.windows:
             w.close()
             w.deleteLater()
@@ -380,12 +460,21 @@ class AuroraController(QObject):
             self.memo_card = None
             self.reflow_vertical_stack()
 
-    def toggle_memo_card(self):
-        self.show_memo = not self.show_memo
+    def set_show_memo(self, show: bool):
+        show = bool(show)
+        if self.show_memo == show:
+            return
+        self.show_memo = show
         self._sync_memo_card(initial=False)
         if hasattr(self, "act_memo_tray"):
+            self.act_memo_tray.blockSignals(True)
             self.act_memo_tray.setChecked(self.show_memo)
+            self.act_memo_tray.blockSignals(False)
         self._save_config()
+        self.stateChanged.emit()
+
+    def toggle_memo_card(self):
+        self.set_show_memo(not self.show_memo)
 
     def _on_memo_pin_toggled(self, pinned: bool):
         self.memo_pinned = pinned
@@ -403,7 +492,11 @@ class AuroraController(QObject):
         positions = {w.group_key: [w.x(), w.y()] for w in self.windows}
         if self.memo_card is not None:
             positions["__AURORA_MEMO__"] = [self.memo_card.x(), self.memo_card.y()]
-        pinned = {w.group_key: w.pinned for w in self.windows if isinstance(w, CollapsibleAuroraCard)}
+        pinned = dict(self.config.get("pinned", {}))
+        for w in self.windows:
+            if isinstance(w, CollapsibleAuroraCard):
+                pinned[w.group_key] = w.pinned
+        self.config["pinned"] = pinned
 
         data = {
             "partitions": self.partitions,
@@ -412,6 +505,9 @@ class AuroraController(QObject):
             "glass_opacity": self.opacity_key,
             "show_memo": self.show_memo,
             "memo_pinned": self.memo_pinned,
+            "double_click_hide": self.double_click_hide,
+            "hotkeys": self.hotkeys_cfg,
+            "custom_icons": self.custom_icons,
             "clock": self.clock_cfg,
             "taskbar": self.taskbar_cfg,
             "item_orders": self.item_orders,
@@ -480,9 +576,9 @@ class AuroraController(QObject):
         self.theme_key = theme_key
         for w in self._all_stackable_windows():
             w.update()
-        # Clock colon / hairlines / calligraphy gradients follow the aurora palette instantly
         self.clock_widget.refresh()
         self._save_config()
+        self.stateChanged.emit()
 
     def set_glass_opacity(self, opacity_key: str):
         if opacity_key not in GLASS_OPACITY_LEVELS:
@@ -491,12 +587,39 @@ class AuroraController(QObject):
         for w in self._all_stackable_windows():
             w.update()
         self._save_config()
+        self.stateChanged.emit()
 
-    def create_new_capsule_dialog(self):
-        dlg = NewCapsuleDialog()
-        if dlg.exec() != NewCapsuleDialog.Accepted:
-            return
-        title, kind = dlg.get_result()
+    # =========================================================================
+    # Settings Center & Partition / Icon / Hotkey Management APIs
+    # =========================================================================
+    def open_settings(self, page_key: str = "general", target: object = None):
+        if self.spotlight.isVisible():
+            self.spotlight.close()
+        user32.AllowSetForegroundWindow(ASFW_ANY)
+        if self.settings_win is None:
+            self.settings_win = AuroraSettingsWindow(self)
+        self.settings_win.navigate_to(page_key, target)
+        if self.settings_win.isMinimized():
+            self.settings_win.showNormal()
+        else:
+            self.settings_win.show()
+        self.settings_win.raise_()
+        self.settings_win.activateWindow()
+
+    def get_partition_items(self, group_key: str) -> list[Path]:
+        part = next((p for p in self.partitions if p["key"] == group_key), None)
+        if not part:
+            return []
+        folder = GROUPS_DIR / part["folder"]
+        return sort_group_items(group_key, list_valid_partition_items(folder), self.get_custom_order(group_key))
+
+    def is_partition_pinned(self, group_key: str) -> bool:
+        win = next((w for w in self.windows if w.group_key == group_key), None)
+        if isinstance(win, CollapsibleAuroraCard):
+            return bool(win.pinned)
+        return bool(self.config.get("pinned", {}).get(group_key, False))
+
+    def add_partition(self, title: str, kind: str, badge: str = "") -> dict:
         safe_slug = re.sub(r'[<>:"/\\|?*\s]+', "_", title).strip("_") or "Capsule"
         next_idx = len(self.partitions) + 1
         folder_name = f"{next_idx:02d}_{safe_slug}"
@@ -505,21 +628,22 @@ class AuroraController(QObject):
             folder_name = f"{next_idx:02d}_{safe_slug}"
 
         key = f"CAP_{next_idx:02d}_{safe_slug.upper()}"
-        part = {
+        part: dict = {
             "key": key,
             "title": title,
             "folder": folder_name,
-            "kind": kind,
+            "kind": kind if kind in ("card", "bar") else "card",
         }
-        if kind == "bar":
-            part["badge"] = title[:2].upper()
+        if part["kind"] == "bar":
+            part["badge"] = (badge or title[:2]).upper()
 
         (GROUPS_DIR / folder_name).mkdir(parents=True, exist_ok=True)
         self.partitions.append(part)
         self._rebuild_groups_meta()
         self._sync_watcher_paths()
 
-        win = self._create_window_for_partition(part, is_first_bar=False)
+        has_bar = any(isinstance(w, AICapsuleBar) and w.show_search_pill for w in self.windows)
+        win = self._create_window_for_partition(part, is_first_bar=(part["kind"] == "bar" and not has_bar))
         if isinstance(win, CollapsibleAuroraCard):
             win.pinned = True
         self.windows.append(win)
@@ -528,13 +652,97 @@ class AuroraController(QObject):
         if self.visible_state:
             win.show()
         self._save_config()
+        self.stateChanged.emit()
+        return part
 
-    def rename_capsule_dialog(self, group_key: str):
+    def create_new_capsule_dialog(self):
+        dlg = NewCapsuleDialog()
+        if dlg.exec() != NewCapsuleDialog.Accepted:
+            return
+        title, kind = dlg.get_result()
+        self.add_partition(title, kind)
+
+    def update_partition(
+        self,
+        group_key: str,
+        *,
+        title: str | None = None,
+        kind: str | None = None,
+        badge: str | None = None,
+        pinned: bool | None = None,
+    ):
         part = next((p for p in self.partitions if p["key"] == group_key), None)
         win = next((w for w in self.windows if w.group_key == group_key), None)
         if not part or not win:
             return
 
+        old_kind = part.get("kind", "card")
+        new_kind = kind if kind in ("card", "bar") else old_kind
+        if title:
+            part["title"] = title
+        part["kind"] = new_kind
+        if new_kind == "bar":
+            part["badge"] = (badge or part.get("badge") or part["title"][:2]).upper()
+
+        if pinned is not None:
+            self.config.setdefault("pinned", {})[group_key] = bool(pinned)
+
+        self._rebuild_groups_meta()
+
+        if new_kind != old_kind:
+            self._build_all_windows()
+            self._apply_initial_positions()
+            if self.visible_state:
+                for w in self.windows:
+                    w.show()
+        else:
+            win.title = part["title"]
+            if isinstance(win, AICapsuleBar):
+                win.badge_text = part.get("badge", part["title"][:2].upper())
+            elif isinstance(win, CollapsibleAuroraCard) and pinned is not None:
+                win.pinned = bool(pinned)
+                if win.pinned:
+                    win.expand_card()
+                else:
+                    win.collapse_card(force=True)
+            win.update()
+            self.reload_all_groups()
+
+        self._save_config()
+        self.stateChanged.emit()
+
+    def move_partition(self, group_key: str, delta: int) -> bool:
+        idx = next((i for i, p in enumerate(self.partitions) if p["key"] == group_key), -1)
+        target_idx = idx + delta
+        if idx < 0 or not (0 <= target_idx < len(self.partitions)):
+            return False
+
+        other_key = self.partitions[target_idx]["key"]
+        self.partitions[idx], self.partitions[target_idx] = self.partitions[target_idx], self.partitions[idx]
+        self.windows[idx], self.windows[target_idx] = self.windows[target_idx], self.windows[idx]
+        self.dragged_keys.discard(group_key)
+        self.dragged_keys.discard(other_key)
+
+        # Ensure only the topmost horizontal bar shows the Spotlight pill
+        first_bar_seen = False
+        for w in self.windows:
+            if isinstance(w, AICapsuleBar):
+                want_pill = not first_bar_seen
+                first_bar_seen = True
+                if w.show_search_pill != want_pill:
+                    w.show_search_pill = want_pill
+                    w.reload_items()
+
+        self._rebuild_groups_meta()
+        self.reflow_vertical_stack()
+        self._save_config()
+        self.stateChanged.emit()
+        return True
+
+    def rename_capsule_dialog(self, group_key: str):
+        part = next((p for p in self.partitions if p["key"] == group_key), None)
+        if not part:
+            return
         dlg = QInputDialog()
         dlg.setStyleSheet(DIALOG_QSS)
         dlg.setWindowTitle("重命名极光胶囊")
@@ -542,26 +750,15 @@ class AuroraController(QObject):
         dlg.setTextValue(part.get("badge", part["title"]) if part.get("kind") == "bar" else part["title"])
         if dlg.exec() != QInputDialog.Accepted:
             return
-
         new_title = dlg.textValue().strip()
         if not new_title:
             return
-
         if part.get("kind") == "bar":
-            part["badge"] = new_title[:3]
-            part["title"] = f"{new_title} 悬浮胶囊栏"
-            win.badge_text = part["badge"]
-            win.title = part["title"]
+            self.update_partition(group_key, title=f"{new_title} 悬浮胶囊栏", badge=new_title[:3])
         else:
-            part["title"] = new_title
-            win.title = new_title
+            self.update_partition(group_key, title=new_title)
 
-        self._rebuild_groups_meta()
-        win.update()
-        self.reload_all_groups()
-        self._save_config()
-
-    def delete_capsule_dialog(self, group_key: str):
+    def delete_capsule_dialog(self, group_key: str, parent_widget: QWidget | None = None):
         if len(self.partitions) <= 1:
             return
         part = next((p for p in self.partitions if p["key"] == group_key), None)
@@ -569,7 +766,7 @@ class AuroraController(QObject):
         if not part or not win:
             return
 
-        box = QMessageBox()
+        box = QMessageBox(parent_widget)
         box.setStyleSheet(DIALOG_QSS)
         box.setWindowTitle("删除极光胶囊")
         box.setText(f"确定要移除胶囊「{part['title']}」吗？\n（内部快捷方式将安全移入 Removed_Backup 备份夹，绝不删除原程序）")
@@ -601,6 +798,161 @@ class AuroraController(QObject):
         self.reload_all_groups()
         self.reflow_vertical_stack()
         self._save_config()
+        self.stateChanged.emit()
+
+    def add_files_to_partition(self, parent_widget: QWidget, group_key: str) -> bool:
+        part = next((p for p in self.partitions if p["key"] == group_key), None)
+        if not part:
+            return False
+        if prompt_add_items_to_folder(parent_widget, GROUPS_DIR / part["folder"]):
+            self.reload_all_groups()
+            self.stateChanged.emit()
+            return True
+        return False
+
+    def add_dir_to_partition(self, parent_widget: QWidget, group_key: str) -> bool:
+        part = next((p for p in self.partitions if p["key"] == group_key), None)
+        if not part:
+            return False
+        if prompt_add_directory_to_folder(parent_widget, GROUPS_DIR / part["folder"]):
+            self.reload_all_groups()
+            self.stateChanged.emit()
+            return True
+        return False
+
+    def open_partition_folder(self, group_key: str):
+        part = next((p for p in self.partitions if p["key"] == group_key), None)
+        if part:
+            folder = GROUPS_DIR / part["folder"]
+            folder.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["explorer.exe", str(folder)])
+
+    def open_data_root(self):
+        subprocess.Popen(["explorer.exe", str(DATA_ROOT)])
+
+    def set_item_custom_icon(self, item_path: Path, src_icon_file: Path) -> bool:
+        out_name = self.icon_loader.import_custom_icon(src_icon_file)
+        if not out_name:
+            return False
+        rel = item_rel_key(item_path)
+        self.custom_icons[rel] = out_name
+        self.icon_loader.set_custom_icons(self.custom_icons)
+        self.reload_all_groups()
+        self._save_config()
+        self.stateChanged.emit()
+        return True
+
+    def clear_item_custom_icon(self, item_path: Path):
+        rel = item_rel_key(item_path)
+        if rel in self.custom_icons:
+            self.custom_icons.pop(rel, None)
+            self.icon_loader.set_custom_icons(self.custom_icons)
+            self.reload_all_groups()
+            self._save_config()
+            self.stateChanged.emit()
+
+    def rename_partition_item(self, item_path: Path, new_name: str) -> Path | None:
+        if not item_path.exists():
+            return None
+        for ch in '<>:"/\\|?*':
+            new_name = new_name.replace(ch, "")
+        new_name = new_name.strip()
+        if not new_name:
+            return None
+        suffix = item_path.suffix if item_path.is_file() else ""
+        new_path = item_path.with_name(f"{new_name}{suffix}")
+        if new_path == item_path:
+            return item_path
+        if new_path.exists():
+            return None
+
+        old_rel = item_rel_key(item_path)
+        old_filename = item_path.name
+        try:
+            item_path.rename(new_path)
+        except OSError:
+            return None
+
+        new_rel = item_rel_key(new_path)
+        if old_rel in self.custom_icons:
+            self.custom_icons[new_rel] = self.custom_icons.pop(old_rel)
+            self.icon_loader.set_custom_icons(self.custom_icons)
+
+        for grp_k, order_list in self.item_orders.items():
+            self.item_orders[grp_k] = [new_path.name if n == old_filename else n for n in order_list]
+
+        self.reload_all_groups()
+        self._save_config()
+        self.stateChanged.emit()
+        return new_path
+
+    def open_item_location(self, item_path: Path):
+        open_target_location(item_path, self.icon_loader)
+
+    def remove_partition_item(self, item_path: Path):
+        rel = item_rel_key(item_path)
+        self.custom_icons.pop(rel, None)
+        self.icon_loader.set_custom_icons(self.custom_icons)
+        safe_remove_shortcut(item_path)
+        self.reload_all_groups()
+        self._save_config()
+        self.stateChanged.emit()
+
+    def clear_icon_cache(self):
+        self.icon_loader.invalidate(clear_disk_cache=True)
+        self.reload_all_groups()
+
+    def update_hotkeys(
+        self,
+        *,
+        double_ctrl_spotlight: bool | None = None,
+        spotlight: str | None = None,
+        toggle_cards: str | None = None,
+        settings: str | None = None,
+    ) -> dict[str, bool]:
+        if double_ctrl_spotlight is not None:
+            self.hotkeys_cfg["double_ctrl_spotlight"] = bool(double_ctrl_spotlight)
+            if double_ctrl_spotlight:
+                self.ctrl_watcher.start()
+            else:
+                self.ctrl_watcher.stop()
+        if spotlight is not None:
+            self.hotkeys_cfg["spotlight"] = spotlight.strip()
+        if toggle_cards is not None:
+            self.hotkeys_cfg["toggle_cards"] = toggle_cards.strip()
+        if settings is not None:
+            self.hotkeys_cfg["settings"] = settings.strip()
+
+        self.hotkey_status = self.hotkey_receiver.apply_hotkeys(
+            self.hotkeys_cfg.get("toggle_cards", ""),
+            self.hotkeys_cfg.get("spotlight", ""),
+            self.hotkeys_cfg.get("settings", ""),
+        )
+        self._refresh_tray_labels()
+        self._save_config()
+        return self.hotkey_status
+
+    def reset_default_hotkeys(self) -> dict[str, bool]:
+        return self.update_hotkeys(
+            double_ctrl_spotlight=DEFAULT_HOTKEYS["double_ctrl_spotlight"],
+            spotlight=DEFAULT_HOTKEYS["spotlight"],
+            toggle_cards=DEFAULT_HOTKEYS["toggle_cards"],
+            settings=DEFAULT_HOTKEYS["settings"],
+        )
+
+    def set_double_click_hide(self, enabled: bool):
+        self.double_click_hide = bool(enabled)
+        if self.double_click_hide:
+            self.dbl_watcher.start()
+        else:
+            self.dbl_watcher.stop()
+        self._save_config()
+        self.stateChanged.emit()
+
+    def set_lock_positions(self, locked: bool):
+        self.lock_positions = bool(locked)
+        self._save_config()
+        self.stateChanged.emit()
 
     def _on_fs_changed(self):
         known_folders = {p["folder"].lower() for p in self.partitions}
@@ -629,6 +981,7 @@ class AuroraController(QObject):
             self._save_config()
 
         self.reload_all_groups()
+        self.stateChanged.emit()
 
     def _initial_auto_collapse(self):
         for c in self.cards:
@@ -639,13 +992,9 @@ class AuroraController(QObject):
 
     def _on_pin_toggled(self, group_key: str, pinned: bool):
         self._save_config()
+        self.stateChanged.emit()
 
     def _on_user_dragged(self, group_key: str):
-        if group_key in self.dragged_keys:
-            # Check if snapped back to X=24
-            win = next((w for w in self._all_stackable_windows() if w.group_key == group_key), None)
-            if win and win.x() == self.LEFT_MARGIN:
-                pass
         self.dragged_keys.add(group_key)
         self._save_config()
 
@@ -655,6 +1004,8 @@ class AuroraController(QObject):
             hwnds.add(int(self.clock_widget.winId()))
         if self.spotlight.isVisible():
             hwnds.add(int(self.spotlight.winId()))
+        if self.settings_win is not None and self.settings_win.isVisible():
+            hwnds.add(int(self.settings_win.winId()))
         return hwnds
 
     def _on_explorer_restarted(self):
@@ -690,19 +1041,32 @@ class AuroraController(QObject):
                 w.fade_in()
             else:
                 w.fade_out()
-        if hasattr(self, "act_vis"):
-            self.act_vis.setText("隐藏全部极光卡片 (Alt+~)" if self.visible_state else "显示全部极光卡片 (Alt+~)")
+        self._refresh_tray_labels()
+        self.stateChanged.emit()
 
-    def move_shortcut_between_groups(self, src_path: Path, target_group_key: str):
+    def move_shortcut_between_groups(self, src_path: Path, target_group_key: str) -> Path | None:
         if target_group_key not in self.all_groups_meta or not src_path.exists():
-            return
+            return None
         dest_folder = self.all_groups_meta[target_group_key][1]
         dest_path = dest_folder / src_path.name
+        if dest_path.resolve() == src_path.resolve():
+            return src_path
+
+        old_rel = item_rel_key(src_path)
         try:
             shutil.move(str(src_path), str(dest_path))
         except Exception:
             shutil.copy2(str(src_path), str(dest_path))
+
+        new_rel = item_rel_key(dest_path)
+        if old_rel in self.custom_icons:
+            self.custom_icons[new_rel] = self.custom_icons.pop(old_rel)
+            self.icon_loader.set_custom_icons(self.custom_icons)
+            self._save_config()
+
         self.reload_all_groups()
+        self.stateChanged.emit()
+        return dest_path
 
     def reload_all_groups(self):
         for w in self.windows:
@@ -725,14 +1089,16 @@ class AuroraController(QObject):
                 c.expand_card()
                 c.update()
             self._save_config()
+            self.stateChanged.emit()
         elif action_name == "unpin_all":
             for c in self.cards:
                 c.pinned = False
                 c.collapse_card(force=True)
                 c.update()
             self._save_config()
+            self.stateChanged.emit()
 
-    def _is_autorun_enabled(self) -> bool:
+    def is_autorun_enabled(self) -> bool:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTORUN_REG_PATH, 0, winreg.KEY_READ) as key:
                 val, _ = winreg.QueryValueEx(key, AUTORUN_KEY_NAME)
@@ -741,7 +1107,6 @@ class AuroraController(QObject):
         except OSError:
             return False
 
-        # Also check Windows 11 Task Manager StartupApproved flag (odd first byte = disabled!)
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_REG_PATH, 0, winreg.KEY_READ) as skey:
                 bval, _ = winreg.QueryValueEx(skey, AUTORUN_KEY_NAME)
@@ -751,13 +1116,11 @@ class AuroraController(QObject):
             pass
         return True
 
-    def _toggle_autorun(self, checked: bool):
-        # Always point at the exe we are actually running from; DATA_ROOT may
-        # live in %APPDATA% for non-portable installs.
+    def _write_autorun_registry(self, checked: bool):
         if getattr(sys, "frozen", False):
-            exe_cmd = f'"{sys.executable}"'
+            exe_cmd = f'"{sys.executable}" --autostart'
         else:
-            exe_cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
+            exe_cmd = f'"{sys.executable}" "{Path(__file__).resolve()}" --autostart'
 
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTORUN_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
@@ -769,20 +1132,24 @@ class AuroraController(QObject):
                     except OSError:
                         pass
             if checked:
-                # Explicitly mark Approved (0x02) in Windows 11 Startup Manager so Task Manager never blocks it!
                 with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_REG_PATH, 0, winreg.KEY_SET_VALUE) as skey:
                     winreg.SetValueEx(skey, AUTORUN_KEY_NAME, 0, winreg.REG_BINARY, b"\x02" + b"\x00" * 11)
         except OSError:
             pass
 
+    def set_autorun(self, checked: bool):
+        self._write_autorun_registry(checked)
+        self.stateChanged.emit()
+
+    # =========================================================================
+    # Clean, Slim System Tray Menu (heavy settings live in AuroraSettingsWindow)
+    # =========================================================================
     def _setup_tray(self):
         icon_file = ICON_ICO_PATH if ICON_ICO_PATH.exists() else ICON_PNG_PATH
         tray_icon = QIcon(str(icon_file)) if icon_file.exists() else self.app.style().standardIcon(self.app.style().StandardPixmap.SP_DesktopIcon)
 
         self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip(f"Aurora Desktop v{APP_VERSION} · 极光毛玻璃桌面收纳\n双击 Ctrl：极光全局搜索 | 双击桌面空白：一键隐身")
 
-        # Release check is user-triggered only (no background network traffic).
         self.update_checker = UpdateChecker(APP_VERSION, self)
         self.update_checker.checkStarted.connect(self._on_update_check_started)
         self.update_checker.checkFinished.connect(self._on_update_check_finished)
@@ -793,88 +1160,58 @@ class AuroraController(QObject):
         menu = QMenu()
         menu.setStyleSheet(MENU_QSS)
 
-        act_spot = menu.addAction("🔍 极光全局搜索 (双击 Ctrl / Alt+S)")
-        act_spot.triggered.connect(self.spotlight.toggle_spotlight)
+        self.act_settings = menu.addAction("⚙️ 打开主控台...")
+        self.act_settings.triggered.connect(lambda: self.open_settings("general"))
 
-        act_new = menu.addAction("➕ 新建极光胶囊分区...")
-        act_new.triggered.connect(self.create_new_capsule_dialog)
+        self.act_spot = menu.addAction("🔍 极光全局搜索")
+        self.act_spot.triggered.connect(self.spotlight.toggle_spotlight)
 
-        self.act_memo_tray = menu.addAction("📝 极光速记便签卡 (Quick Memo)")
+        menu.addSeparator()
+
+        self.act_memo_tray = menu.addAction("📝 极光速记便签")
         self.act_memo_tray.setCheckable(True)
         self.act_memo_tray.setChecked(self.show_memo)
-        self.act_memo_tray.triggered.connect(self.toggle_memo_card)
+        self.act_memo_tray.triggered.connect(self.set_show_memo)
 
-        menu.addSeparator()
-        # Fused Desktop Clock submenu (Rainmeter replacement)
-        clk_menu = menu.addMenu("🕒 右上角极简桌面时钟 (Rainmeter 融合)")
-        self.clock_widget.build_clock_menu(clk_menu)
-
-        # Fused Taskbar Transparency submenu (TranslucentTB replacement)
-        self.taskbar_engine.build_taskbar_menu(menu)
-
-        menu.addSeparator()
-        # Theme submenu
-        theme_menu = menu.addMenu("🎨 极光流光色温")
-        theme_menu.setStyleSheet(MENU_QSS)
-        theme_group = QActionGroup(self)
-        for t_key, (_, _, _, t_label) in AURORA_THEMES.items():
-            a = theme_menu.addAction(t_label)
-            a.setCheckable(True)
-            a.setChecked(t_key == self.theme_key)
-            theme_group.addAction(a)
-            a.triggered.connect(lambda checked=False, k=t_key: self.set_aurora_theme(k))
-
-        # Glass opacity submenu
-        op_menu = menu.addMenu("💧 毛玻璃通透度")
-        op_menu.setStyleSheet(MENU_QSS)
-        op_group = QActionGroup(self)
-        for o_key, (_, o_label) in GLASS_OPACITY_LEVELS.items():
-            a = op_menu.addAction(o_label)
-            a.setCheckable(True)
-            a.setChecked(o_key == self.opacity_key)
-            op_group.addAction(a)
-            a.triggered.connect(lambda checked=False, k=o_key: self.set_glass_opacity(k))
-
-        menu.addSeparator()
-        self.act_vis = menu.addAction("隐藏全部极光卡片 (Alt+~)")
+        self.act_vis = menu.addAction("🙈 隐藏全部桌面卡片")
         self.act_vis.triggered.connect(self.toggle_all_visibility)
 
-        act_pin_all = menu.addAction("全部展开并常驻")
-        act_pin_all.triggered.connect(lambda: self.handle_context_action("pin_all"))
-
-        act_collapse_all = menu.addAction("全部开启 0.5s 自动卷起")
-        act_collapse_all.triggered.connect(lambda: self.handle_context_action("unpin_all"))
-
-        act_lock = menu.addAction("锁定卡片位置")
-        act_lock.setCheckable(True)
-        act_lock.setChecked(self.lock_positions)
-        act_lock.toggled.connect(self._on_lock_toggled)
-
-        act_reset = menu.addAction("重置左侧山体黄金布局")
-        act_reset.triggered.connect(lambda: self.reset_to_left_golden_layout(True))
-
         menu.addSeparator()
-        act_rescan = menu.addAction("重新扫描同步桌面快捷方式")
-        act_rescan.triggered.connect(self._rescan_desktop)
-
-        act_open_dir = menu.addAction("打开映射总目录 (Groups)")
-        act_open_dir.triggered.connect(lambda: subprocess.Popen(["explorer.exe", str(GROUPS_DIR)]))
-
-        act_autorun = menu.addAction("开机自动启动")
-        act_autorun.setCheckable(True)
-        act_autorun.setChecked(self._is_autorun_enabled())
-        act_autorun.toggled.connect(self._toggle_autorun)
 
         self.act_update = menu.addAction("🔄 检查更新")
         self.act_update.triggered.connect(self.update_checker.check)
 
-        menu.addSeparator()
-        act_quit = menu.addAction("退出 AuroraDesktop")
+        act_quit = menu.addAction("🚪 退出 AuroraDesktop")
         act_quit.triggered.connect(self.quit_app)
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
+        self._refresh_tray_labels()
         self.tray.show()
+
+    def _refresh_tray_labels(self):
+        spot_hk = self.hotkeys_cfg.get("spotlight", "")
+        dbl_ctrl = self.hotkeys_cfg.get("double_ctrl_spotlight", True)
+        spot_hints = []
+        if dbl_ctrl:
+            spot_hints.append("双击 Ctrl")
+        if spot_hk:
+            spot_hints.append(format_hotkey_label(spot_hk))
+        spot_suffix = f" ({' / '.join(spot_hints)})" if spot_hints else ""
+
+        tog_hk = self.hotkeys_cfg.get("toggle_cards", "")
+        tog_suffix = f" ({format_hotkey_label(tog_hk)})" if tog_hk else ""
+
+        if hasattr(self, "act_spot"):
+            self.act_spot.setText(f"🔍 极光全局搜索{spot_suffix}")
+        if hasattr(self, "act_vis"):
+            verb = "🙈 隐藏全部桌面卡片" if self.visible_state else "✨ 显示全部桌面卡片"
+            self.act_vis.setText(f"{verb}{tog_suffix}")
+        if hasattr(self, "tray"):
+            self.tray.setToolTip(
+                f"Aurora Desktop v{APP_VERSION} · 极光毛玻璃桌面套件\n"
+                f"全局搜索{spot_suffix or '：托盘唤出'} | 右键打开设置中心"
+            )
 
     def _on_update_check_started(self):
         if hasattr(self, "act_update"):
@@ -887,7 +1224,8 @@ class AuroraController(QObject):
             self.act_update.setText("🔄 检查更新")
 
     def _show_update_box(self, title: str, text: str, icon=QMessageBox.Information, ask_open: bool = False) -> bool:
-        box = QMessageBox()
+        parent = self.settings_win if (self.settings_win and self.settings_win.isVisible()) else None
+        box = QMessageBox(parent)
         box.setStyleSheet(DIALOG_QSS)
         box.setIcon(icon)
         box.setWindowTitle(title)
@@ -916,29 +1254,31 @@ class AuroraController(QObject):
     def _on_update_check_failed(self, err: str):
         self._show_update_box("Aurora Desktop", f"检查更新失败：{err}", icon=QMessageBox.Warning)
 
-    def _on_lock_toggled(self, checked: bool):
-        self.lock_positions = checked
-        self._save_config()
-
-    def _rescan_desktop(self):
-        scan_and_organize()
+    def rescan_desktop_shortcuts(self) -> int:
+        summary = scan_and_organize()
         self.reload_all_groups()
+        self.stateChanged.emit()
+        return sum(len(v) for v in summary.values())
 
     def _on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.Trigger:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.open_settings("general")
+        elif reason == QSystemTrayIcon.MiddleClick:
             self.toggle_all_visibility()
 
     def quit_app(self):
         self.dbl_watcher.stop()
         self.ctrl_watcher.stop()
         self.hotkey_receiver.cleanup()
+        if self.settings_win is not None:
+            self.settings_win.close()
         self.spotlight.close()
         self.clock_widget.close()
         self.tray.hide()
         self.app.quit()
 
 
-def acquire_single_instance_mutex() -> int:
+def acquire_single_instance_mutex(silent_autostart: bool = False) -> int:
     desk_name = "".join(ch if ch.isalnum() else "_" for ch in get_current_desktop_name())
     mutex_name = f"Local\\AuroraDesktop_SingleInstance_{desk_name}_v2"
     kernel32 = ctypes.windll.kernel32
@@ -947,14 +1287,18 @@ def acquire_single_instance_mutex() -> int:
     mutex = kernel32.CreateMutexW(None, False, mutex_name)
     ERROR_ALREADY_EXISTS = 183
     if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        if WM_AURORA_SHOW:
+        if not silent_autostart and WM_AURORA_OPEN_PANEL:
+            user32.AllowSetForegroundWindow(ASFW_ANY)
+            user32.PostMessageW(HWND_BROADCAST, WM_AURORA_OPEN_PANEL, 0, 0)
+        elif WM_AURORA_SHOW:
             user32.PostMessageW(HWND_BROADCAST, WM_AURORA_SHOW, 0, 0)
         sys.exit(0)
     return mutex
 
 
 def main():
-    _mutex = acquire_single_instance_mutex()
+    silent_autostart = ("--autostart" in sys.argv or "--minimized" in sys.argv)
+    _mutex = acquire_single_instance_mutex(silent_autostart=silent_autostart)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("AuroraDesktop")
@@ -974,7 +1318,7 @@ def main():
     if ICON_ICO_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_ICO_PATH)))
 
-    controller = AuroraController(app)
+    controller = AuroraController(app, open_panel_on_start=(not silent_autostart))
     sys.exit(app.exec())
 
 

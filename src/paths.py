@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.3"
 
 
 def get_bundle_dir() -> Path:
@@ -56,6 +56,7 @@ BUNDLE_DIR = get_bundle_dir()
 DATA_ROOT = get_data_root()
 GROUPS_DIR = DATA_ROOT / "Groups"
 CACHE_DIR = DATA_ROOT / "cache" / "icons"
+CUSTOM_ICONS_DIR = DATA_ROOT / "cache" / "custom_icons"
 CONFIG_PATH = DATA_ROOT / "config.json"
 ASSETS_DIR = BUNDLE_DIR / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"

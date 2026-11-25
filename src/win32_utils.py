@@ -38,6 +38,7 @@ WM_SYSCOMMAND = 0x0112
 WM_HOTKEY = 0x0312
 SC_MINIMIZE = 0xF020
 
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND = 2
 DWMWA_TRANSITIONS_FORCEDISABLED = 3
@@ -59,9 +60,111 @@ SM_CYDOUBLECLK = 37
 GA_ROOT = 2
 
 MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 VK_OEM_3 = 0xC0  # '~' / '`' key
 VK_S = 0x53      # 'S' key
+
+SPECIAL_VK_MAP: dict[str, int] = {
+    "`": 0xC0,
+    "~": 0xC0,
+    "space": 0x20,
+    "tab": 0x09,
+    "enter": 0x0D,
+    "return": 0x0D,
+    "-": 0xBD,
+    "=": 0xBB,
+    "[": 0xDB,
+    "]": 0xDD,
+    "\\": 0xDC,
+    ";": 0xBA,
+    "'": 0xDE,
+    ",": 0xBC,
+    ".": 0xBE,
+    "/": 0xBF,
+    "up": 0x26,
+    "down": 0x28,
+    "left": 0x25,
+    "right": 0x27,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "insert": 0x2D,
+    "delete": 0x2E,
+}
+for _i in range(1, 13):
+    SPECIAL_VK_MAP[f"f{_i}"] = 0x70 + (_i - 1)
+
+
+def parse_hotkey_spec(spec: str) -> tuple[int, int] | None:
+    """Parse a hotkey string like 'Alt+S', 'Ctrl+Shift+Space', 'Alt+~' into (win32_mods, vk)."""
+    if not spec or not spec.strip():
+        return None
+    parts = [p.strip() for p in spec.split("+") if p.strip()]
+    if not parts:
+        return None
+
+    mods = 0
+    key_token = ""
+    for p in parts:
+        low = p.lower()
+        if low in ("ctrl", "control"):
+            mods |= MOD_CONTROL
+        elif low == "alt":
+            mods |= MOD_ALT
+        elif low == "shift":
+            mods |= MOD_SHIFT
+        elif low in ("win", "meta", "super"):
+            mods |= MOD_WIN
+        else:
+            key_token = p
+
+    if not key_token:
+        return None
+
+    low_k = key_token.lower()
+    vk = 0
+    if low_k in SPECIAL_VK_MAP:
+        vk = SPECIAL_VK_MAP[low_k]
+    elif len(key_token) == 1 and "a" <= low_k <= "z":
+        vk = ord(low_k.upper())
+    elif len(key_token) == 1 and "0" <= low_k <= "9":
+        vk = ord(low_k)
+
+    if vk == 0:
+        return None
+    # Require at least one modifier unless it's a function key F1..F12
+    if mods == 0 and not (0x70 <= vk <= 0x7B):
+        return None
+    return mods, vk
+
+
+def format_hotkey_label(spec: str) -> str:
+    """Human-friendly display string, e.g. 'Alt+~' -> 'Alt + ~'."""
+    if not spec or not spec.strip():
+        return "未设置"
+    parts = [p.strip() for p in spec.split("+") if p.strip()]
+    pretty = []
+    for p in parts:
+        low = p.lower()
+        if low in ("ctrl", "control"):
+            pretty.append("Ctrl")
+        elif low == "alt":
+            pretty.append("Alt")
+        elif low == "shift":
+            pretty.append("Shift")
+        elif low in ("win", "meta", "super"):
+            pretty.append("Win")
+        elif low in ("`", "~"):
+            pretty.append("~")
+        elif low == "space":
+            pretty.append("Space")
+        else:
+            pretty.append(p.upper() if len(p) <= 3 else p.capitalize())
+    return " + ".join(pretty)
 
 
 class ACCENT_POLICY(ctypes.Structure):
@@ -212,6 +315,7 @@ HWND_BROADCAST = wintypes.HWND(0xFFFF)
 ASFW_ANY = 0xFFFFFFFF
 UOI_NAME = 2
 WM_AURORA_SHOW = user32.RegisterWindowMessageW("AuroraDesktop_ShowAllCards_v1")
+WM_AURORA_OPEN_PANEL = user32.RegisterWindowMessageW("AuroraDesktop_OpenMainPanel_v1")
 
 
 def get_current_desktop_name() -> str:
@@ -254,6 +358,26 @@ def find_desktop_shell_host() -> tuple[int, int, int]:
 
     listview = user32.FindWindowExW(defview, None, "SysListView32", None) if defview else 0
     return (host or 0, defview or 0, listview or 0)
+
+
+def apply_dark_title_bar(hwnd: int):
+    """Apply Windows 11 native immersive dark title bar and rounded corners to standard dialogs/windows."""
+    if not hwnd:
+        return
+    dark = ctypes.c_int(1)
+    dwmapi.DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        ctypes.byref(dark),
+        ctypes.sizeof(dark),
+    )
+    corner_pref = ctypes.c_int(DWMWCP_ROUND)
+    dwmapi.DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        ctypes.byref(corner_pref),
+        ctypes.sizeof(corner_pref),
+    )
 
 
 def apply_acrylic_and_rounded_corners(hwnd: int):

@@ -52,7 +52,7 @@ TASKBAR_MODES: dict[str, tuple[str, int]] = {
 }
 
 SHARED_MEM_NAME = "Local\\AuroraTaskbarSharedState_v1"
-PERSISTENT_TAP_DLL = DATA_ROOT / "AuroraTaskbarTAP.dll"
+PERSISTENT_TAP_DLL = DATA_ROOT / "cache" / "AuroraTaskbarTAP.dll"
 
 
 def apply_win32_taskbar_backdrop(mode_key: str):
@@ -134,8 +134,14 @@ class TaskbarTransparencyEngine(QObject):
         bundled = ASSETS_DIR / "AuroraTaskbarTAP.dll"
         if bundled.exists():
             try:
+                PERSISTENT_TAP_DLL.parent.mkdir(parents=True, exist_ok=True)
                 if not PERSISTENT_TAP_DLL.exists() or bundled.stat().st_size != PERSISTENT_TAP_DLL.stat().st_size:
                     shutil.copy2(str(bundled), str(PERSISTENT_TAP_DLL))
+                    subprocess.run(
+                        ["icacls", str(PERSISTENT_TAP_DLL.parent), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/grant", "*S-1-1-0:(OI)(CI)(RX)"],
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        check=False,
+                    )
                     subprocess.run(
                         ["icacls", str(PERSISTENT_TAP_DLL), "/grant", "*S-1-15-2-1:(RX)", "/grant", "*S-1-1-0:(RX)"],
                         creationflags=subprocess.CREATE_NO_WINDOW,

@@ -8,7 +8,7 @@ from PySide6.QtCore import QFileInfo, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QFileIconProvider
 
-from paths import CACHE_DIR
+from paths import CACHE_DIR, CUSTOM_ICONS_DIR, GROUPS_DIR
 
 user32 = ctypes.windll.user32
 shell32 = ctypes.windll.shell32
@@ -167,43 +167,139 @@ def _shgetfileinfo_pixmap(target_path: str) -> QPixmap:
     return QPixmap()
 
 
-class ShortcutIconLoader:
-    """High-DPI crisp shortcut icon extractor with persistent PNG cache and zero shortcut-arrow clutter."""
+def item_rel_key(item_path: Path) -> str:
+    """Normalized relative key under GROUPS_DIR (e.g. '01_ai_capsule/claude.lnk')."""
+    try:
+        rel = item_path.resolve().relative_to(GROUPS_DIR.resolve())
+        return rel.as_posix().lower()
+    except Exception:
+        return item_path.name.lower()
 
-    def __init__(self):
+
+class ShortcutIconLoader:
+    """High-DPI crisp shortcut icon extractor with custom icon overrides and persistent PNG cache."""
+
+    def __init__(self, custom_icons: dict[str, str] | None = None):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        CUSTOM_ICONS_DIR.mkdir(parents=True, exist_ok=True)
         self._provider = QFileIconProvider()
         try:
             self._shell = win32com.client.Dispatch("WScript.Shell")
         except Exception:
             self._shell = None
         self._mem_cache: dict[str, QPixmap] = {}
+        self._custom_icons: dict[str, str] = {k.lower(): v for k, v in (custom_icons or {}).items()}
+
+    def set_custom_icons(self, custom_icons: dict[str, str]):
+        self._custom_icons = {k.lower(): v for k, v in (custom_icons or {}).items()}
+        self._mem_cache.clear()
+
+    def has_custom_icon(self, item_path: Path) -> bool:
+        rel = item_rel_key(item_path)
+        fname = self._custom_icons.get(rel)
+        return bool(fname and (CUSTOM_ICONS_DIR / fname).exists())
+
+    def import_custom_icon(self, src_file: Path) -> str | None:
+        """Convert any image (.png/.ico/.jpg/.webp/.bmp/.svg) or binary (.exe/.dll) into a 128px PNG in CUSTOM_ICONS_DIR."""
+        if not src_file.exists():
+            return None
+        CUSTOM_ICONS_DIR.mkdir(parents=True, exist_ok=True)
+        ext = src_file.suffix.lower()
+        pm = QPixmap()
+
+        if ext in (".exe", ".dll"):
+            pm = _extract_hicon_to_pixmap(str(src_file), 0, 128)
+            if pm.isNull():
+                pm = _shgetfileinfo_pixmap(str(src_file))
+        elif ext == ".ico":
+            pm = _extract_hicon_to_pixmap(str(src_file), 0, 128)
+            if pm.isNull():
+                pm = QIcon(str(src_file)).pixmap(128, 128)
+        elif ext == ".lnk":
+            pm = self._extract_fresh(src_file)
+        else:
+            img = QImage(str(src_file))
+            if not img.isNull():
+                # Keep alpha if transparent icon; gently round corners if full-bleed opaque photo
+                if not img.hasAlphaChannel() and ext in (".jpg", ".jpeg", ".bmp"):
+                    pm = _render_rounded_image_thumbnail(str(src_file), 128)
+                else:
+                    canvas = QPixmap(128, 128)
+                    canvas.fill(Qt.transparent)
+                    scaled = QPixmap.fromImage(img).scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    painter = QPainter(canvas)
+                    painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+                    painter.drawPixmap((128 - scaled.width()) // 2, (128 - scaled.height()) // 2, scaled)
+                    painter.end()
+                    pm = canvas
+            else:
+                pm = QIcon(str(src_file)).pixmap(128, 128)
+
+        if pm.isNull():
+            return None
+
+        try:
+            mtime = int(src_file.stat().st_mtime_ns)
+        except OSError:
+            mtime = 0
+        digest = hashlib.md5(f"{src_file}:{mtime}".encode("utf-8")).hexdigest()[:14]
+        out_name = f"custom_{digest}.png"
+        out_path = CUSTOM_ICONS_DIR / out_name
+        if not pm.save(str(out_path), "PNG"):
+            return None
+        return out_name
+
+    def invalidate(self, item_path: Path | None = None, clear_disk_cache: bool = False):
+        if item_path is not None:
+            prefix = f"{str(item_path).lower()}:"
+            for k in [k for k in self._mem_cache if k.startswith(prefix)]:
+                self._mem_cache.pop(k, None)
+        else:
+            self._mem_cache.clear()
+        if clear_disk_cache and CACHE_DIR.exists():
+            for f in CACHE_DIR.glob("*.png"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
 
     def get_icon_pixmap(self, item_path: Path, size: int = 64) -> QPixmap:
-        key = str(item_path).lower()
-        if key in self._mem_cache:
-            return self._mem_cache[key]
+        rel = item_rel_key(item_path)
+        custom_fname = self._custom_icons.get(rel, "")
+        custom_path = (CUSTOM_ICONS_DIR / custom_fname) if custom_fname else None
+        has_custom = bool(custom_path and custom_path.exists())
+
+        cache_key = f"{str(item_path).lower()}:{size}:{custom_fname if has_custom else ''}"
+        if cache_key in self._mem_cache:
+            return self._mem_cache[cache_key]
+
+        if has_custom and custom_path is not None:
+            pm = QPixmap(str(custom_path))
+            if not pm.isNull():
+                scaled = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._mem_cache[cache_key] = scaled
+                return scaled
 
         try:
             mtime = int(item_path.stat().st_mtime)
         except OSError:
             mtime = 0
 
-        digest = hashlib.md5(f"{key}:{mtime}".encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.md5(f"{str(item_path).lower()}:{mtime}".encode("utf-8")).hexdigest()[:16]
         cache_file = CACHE_DIR / f"{digest}.png"
 
         if cache_file.exists():
             pm = QPixmap(str(cache_file))
             if not pm.isNull():
                 scaled = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self._mem_cache[key] = scaled
+                self._mem_cache[cache_key] = scaled
                 return scaled
 
         pm = self._extract_fresh(item_path)
         if not pm.isNull():
             pm.save(str(cache_file), "PNG")
             scaled = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._mem_cache[key] = scaled
+            self._mem_cache[cache_key] = scaled
             return scaled
 
         return QPixmap()

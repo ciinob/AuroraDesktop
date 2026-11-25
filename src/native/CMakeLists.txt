@@ -31,11 +31,12 @@ set_target_properties(AuroraTaskbarTAP PROPERTIES
     OUTPUT_NAME "AuroraTaskbarTAP"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/out/Release"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/out"
 )
 
 # Build example (Developer Command Prompt for VS, x64):
-#   cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+#   cmake -S . -B build -A x64
 #   cmake --build build --config Release
 # Then copy build/out/Release/AuroraTaskbarTAP.dll to assets/.
