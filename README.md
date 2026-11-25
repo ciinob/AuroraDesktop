@@ -10,6 +10,8 @@
 [![Release](https://img.shields.io/github/v/release/ciinob/AuroraDesktop?color=2dd4bf&label=Release)](https://github.com/ciinob/AuroraDesktop/releases)
 [![Built with](https://img.shields.io/badge/Built%20with-PySide6%20%2B%20C%2B%2B-a855f7)](https://github.com/ciinob/AuroraDesktop)
 
+中文 | **[English](README.en.md)**
+
 单文件、免安装、开机自启。双击 `AuroraDesktop.exe`，桌面即刻焕然一新。
 
 </div>
