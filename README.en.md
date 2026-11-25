@@ -52,11 +52,12 @@ From anywhere, **double-tap `Ctrl`** (or press `Alt + S`) to summon it instantly
 | `Alt + Enter` | Open file location |
 | `Esc` | Close |
 
-### 🧊 Frosted Capsule Organizer
+### 🧊 Frosted Capsule Organizer & Live Folder Portals
 - Desktop icons are auto-grouped into frosted-glass cards (**AI / Dev / Play / Tools / Documents**), with auto roll-up and magnetic alignment
-- **Drag to reorder icons freely**, or drag them straight across capsules
-- **VisionOS-style cursor-tracking border**: a 1px aurora highlight refracts along your cursor, and each icon glows with its own brand color (Claude coral, VS Code ice blue, WeChat jade…)
-- 4 aurora color temperatures × 3 glass opacity levels — one click away in the tray menu
+- **📂 Live Folder Portals**: map `Downloads`, screenshots, or active project folders straight onto your desktop — newest files surface automatically and can be dragged right into chat or browser uploads
+- **✨ One-click Native Desktop Icon Hiding & Dynamic Recycle Bin**: hide cluttered Windows desktop icons non-destructively (auto-restored on exit), with built-in This PC & live empty/full Recycle Bin tiles
+- **Custom icons & VisionOS cursor-tracking border**: override any item with PNG / ICO / EXE icons, refracting adaptive brand-color halos along a 1px aurora border
+- 4 aurora color temperatures × 3 glass opacity levels in the Control Center
 
 ### 🕒 Haute-Couture Desktop Clock
 8 hand-tuned typographic styles. Colons and hairlines follow the active aurora theme; ticking is aligned to second/minute boundaries (one repaint per minute when seconds are hidden — zero idle cost):
@@ -80,8 +81,8 @@ Still perfectly legible on bright wallpapers (multi-layer soft halo):
 
 ![Clock styles on light wallpaper](docs/images/clock-styles-light.png)
 
-### 🪟 Truly Transparent Taskbar
-A custom C++ native engine (`AuroraTaskbarTAP.dll`, combining XAML `BackgroundFill` with Win32 `ACCENT_ENABLE_TRANSPARENTGRADIENT`) makes the taskbar genuinely disappear — wallpaper runs from the top of the screen to the very bottom. No more TranslucentTB black-bar conflicts.
+### 🪟 Dynamic Transparent Taskbar Engine
+A custom C++ native engine (`AuroraTaskbarTAP.dll`, combining XAML `BackgroundFill` with Win32 `ACCENT_ENABLE_TRANSPARENTGRADIENT`) makes the taskbar genuinely disappear on the desktop, while **automatically switching to dark frosted acrylic whenever a window is maximized** for crisp legibility against bright apps. No more TranslucentTB black-bar conflicts.
 
 ## 📦 Install
 

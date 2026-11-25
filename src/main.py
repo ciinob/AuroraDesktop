@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox, QS
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from clock_widget import AuroraClockWidget
-from icon_extractor import ShortcutIconLoader, item_rel_key
+from icon_extractor import ShortcutIconLoader, item_rel_key, query_recycle_bin_state
 from memo_card import AuroraMemoCard
 from organize_shortcuts import scan_and_organize
 from paths import APP_VERSION, CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
@@ -28,12 +28,14 @@ from widgets import (
     AICapsuleBar,
     AURORA_THEMES,
     AuroraBaseWindow,
+    AuroraIconTile,
     CollapsibleAuroraCard,
     DIALOG_QSS,
     GLASS_OPACITY_LEVELS,
     MENU_QSS,
     NewCapsuleDialog,
     launch_item,
+    list_portal_items,
     list_valid_partition_items,
     make_apple_font,
     open_target_location,
@@ -51,11 +53,13 @@ from win32_utils import (
     WM_AURORA_OPEN_PANEL,
     WM_AURORA_SHOW,
     WM_HOTKEY,
+    are_system_desktop_icons_visible,
     batch_defer_window_rects,
     format_hotkey_label,
     get_current_desktop_name,
     parse_hotkey_spec,
     send_to_bottom,
+    set_system_desktop_icons_visible,
     user32,
 )
 
@@ -172,6 +176,10 @@ class AuroraController(QObject):
         self.visible_state = True
         self.lock_positions = bool(self.config.get("lock_positions", False))
         self.double_click_hide = bool(self.config.get("double_click_hide", True))
+        self.hide_desktop_icons: bool | None = (
+            bool(self.config["hide_desktop_icons"]) if "hide_desktop_icons" in self.config else None
+        )
+        self._last_rb_non_empty, _, _ = query_recycle_bin_state()
         self.theme_key = self.config.get("theme", "aurora")
         if self.theme_key not in AURORA_THEMES:
             self.theme_key = "aurora"
@@ -188,6 +196,9 @@ class AuroraController(QObject):
         self.dragged_keys: set[str] = set(self.config.get("dragged_keys", []))
         self.hotkeys_cfg: dict = {**DEFAULT_HOTKEYS, **dict(self.config.get("hotkeys", {}))}
         self.hotkey_status: dict[str, bool] = {"spotlight": True, "toggle_cards": True, "settings": True}
+        self.windows: list[AuroraBaseWindow] = []
+        self.memo_card: AuroraMemoCard | None = None
+        self.spotlight: AuroraSpotlightOverlay | None = None
         self.settings_win: AuroraSettingsWindow | None = None
 
         GROUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,7 +240,11 @@ class AuroraController(QObject):
             self.taskbar_cfg = self.config["taskbar"]
         else:
             self.taskbar_cfg = import_existing_ttb_config()
-        self.taskbar_engine = TaskbarTransparencyEngine(self.taskbar_cfg, self)
+        self.taskbar_engine = TaskbarTransparencyEngine(
+            self.taskbar_cfg,
+            self,
+            own_hwnds_provider=self.get_all_hwnds,
+        )
         self.taskbar_engine.configChanged.connect(self._on_subcomponent_changed)
 
         self.windows: list[AuroraBaseWindow] = []
@@ -304,6 +319,9 @@ class AuroraController(QObject):
         if self.is_autorun_enabled():
             self._write_autorun_registry(True)
 
+        if self.hide_desktop_icons is True:
+            set_system_desktop_icons_visible(False)
+
         self._save_config()
         QTimer.singleShot(3500, self._initial_auto_collapse)
         if self._open_panel_on_start:
@@ -334,17 +352,31 @@ class AuroraController(QObject):
         self.item_orders[group_key] = new_names
         self._save_config()
 
+    def _partition_folder(self, p: dict) -> Path:
+        if p.get("kind") == "portal" and p.get("portal_path"):
+            return Path(p["portal_path"])
+        return GROUPS_DIR / p.get("folder", "Capsule")
+
+    def get_portal_sort(self, group_key: str) -> str:
+        p = next((x for x in self.partitions if x["key"] == group_key), None)
+        return str((p or {}).get("sort_by") or "mtime_desc")
+
+    def get_portal_max_items(self, group_key: str) -> int:
+        p = next((x for x in self.partitions if x["key"] == group_key), None)
+        return int((p or {}).get("max_items") or 15)
+
     def _init_partitions(self) -> list[dict]:
         saved = self.config.get("partitions")
         parts = [dict(p) for p in (saved if isinstance(saved, list) and saved else DEFAULT_PARTITIONS)]
 
-        known_folders = {p["folder"].lower() for p in parts}
+        known_folders = {p["folder"].lower() for p in parts if p.get("folder") and p.get("kind") != "portal"}
         for p in parts:
-            (GROUPS_DIR / p["folder"]).mkdir(parents=True, exist_ok=True)
+            if p.get("kind") != "portal" and p.get("folder"):
+                (GROUPS_DIR / p["folder"]).mkdir(parents=True, exist_ok=True)
 
         for sub in sorted(GROUPS_DIR.iterdir(), key=lambda x: x.name.lower()):
             if sub.is_dir() and sub.name.lower() not in known_folders:
-                clean_title = re.sub(r"^\d+[_-\s]*", "", sub.name).strip() or sub.name
+                clean_title = re.sub(r"^\d+[_\s-]*", "", sub.name).strip() or sub.name
                 parts.append({
                     "key": f"CUSTOM_{sub.name.upper()}",
                     "title": clean_title,
@@ -357,20 +389,27 @@ class AuroraController(QObject):
     def _rebuild_groups_meta(self):
         self.all_groups_meta.clear()
         for p in self.partitions:
-            self.all_groups_meta[p["key"]] = (p["title"], GROUPS_DIR / p["folder"])
+            if p.get("kind") != "portal":
+                self.all_groups_meta[p["key"]] = (p["title"], self._partition_folder(p))
 
     def _sync_watcher_paths(self):
         existing = self.fs_watcher.directories()
         if existing:
             self.fs_watcher.removePaths(existing)
-        paths = [str(GROUPS_DIR)] + [str(GROUPS_DIR / p["folder"]) for p in self.partitions if (GROUPS_DIR / p["folder"]).exists()]
+        paths = [str(GROUPS_DIR)]
+        for p in self.partitions:
+            f = self._partition_folder(p)
+            if f.exists():
+                paths.append(str(f))
         self.fs_watcher.addPaths(paths)
 
     def _create_window_for_partition(self, p: dict, is_first_bar: bool = False) -> AuroraBaseWindow:
         g_key = p["key"]
         title = p["title"]
-        folder = GROUPS_DIR / p["folder"]
-        folder.mkdir(parents=True, exist_ok=True)
+        is_portal = p.get("kind") == "portal"
+        folder = self._partition_folder(p)
+        if not is_portal:
+            folder.mkdir(parents=True, exist_ok=True)
         pinned_map = self.config.get("pinned", {})
 
         if p.get("kind") == "bar":
@@ -404,6 +443,9 @@ class AuroraController(QObject):
                 theme_provider=self.get_current_theme_colors,
                 opacity_provider=self.get_current_glass_opacity,
                 custom_order_provider=self.get_custom_order,
+                is_portal=is_portal,
+                portal_sort_provider=self.get_portal_sort,
+                portal_max_provider=self.get_portal_max_items,
             )
             win.heightAnimated.connect(self.reflow_vertical_stack)
             win.pinToggled.connect(self._on_pin_toggled)
@@ -515,6 +557,8 @@ class AuroraController(QObject):
             "dragged_keys": sorted(self.dragged_keys),
             "positions": positions,
         }
+        if self.hide_desktop_icons is not None:
+            data["hide_desktop_icons"] = self.hide_desktop_icons
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _all_stackable_windows(self) -> list[AuroraBaseWindow]:
@@ -610,7 +654,9 @@ class AuroraController(QObject):
         part = next((p for p in self.partitions if p["key"] == group_key), None)
         if not part:
             return []
-        folder = GROUPS_DIR / part["folder"]
+        folder = self._partition_folder(part)
+        if part.get("kind") == "portal":
+            return list_portal_items(folder, self.get_portal_sort(group_key), self.get_portal_max_items(group_key))
         return sort_group_items(group_key, list_valid_partition_items(folder), self.get_custom_order(group_key))
 
     def is_partition_pinned(self, group_key: str) -> bool:
@@ -619,7 +665,15 @@ class AuroraController(QObject):
             return bool(win.pinned)
         return bool(self.config.get("pinned", {}).get(group_key, False))
 
-    def add_partition(self, title: str, kind: str, badge: str = "") -> dict:
+    def add_partition(
+        self,
+        title: str,
+        kind: str,
+        badge: str = "",
+        portal_path: str = "",
+        sort_by: str = "mtime_desc",
+        max_items: int = 15,
+    ) -> dict:
         safe_slug = re.sub(r'[<>:"/\\|?*\s]+', "_", title).strip("_") or "Capsule"
         next_idx = len(self.partitions) + 1
         folder_name = f"{next_idx:02d}_{safe_slug}"
@@ -628,22 +682,30 @@ class AuroraController(QObject):
             folder_name = f"{next_idx:02d}_{safe_slug}"
 
         key = f"CAP_{next_idx:02d}_{safe_slug.upper()}"
+        norm_kind = kind if kind in ("card", "bar", "portal") else "card"
         part: dict = {
             "key": key,
             "title": title,
             "folder": folder_name,
-            "kind": kind if kind in ("card", "bar") else "card",
+            "kind": norm_kind,
         }
-        if part["kind"] == "bar":
+        if norm_kind == "bar":
             part["badge"] = (badge or title[:2]).upper()
+        elif norm_kind == "portal":
+            part["portal_path"] = portal_path
+            part["sort_by"] = sort_by or "mtime_desc"
+            part["max_items"] = int(max_items or 15)
+        else:
+            (GROUPS_DIR / folder_name).mkdir(parents=True, exist_ok=True)
+        if norm_kind == "bar":
+            (GROUPS_DIR / folder_name).mkdir(parents=True, exist_ok=True)
 
-        (GROUPS_DIR / folder_name).mkdir(parents=True, exist_ok=True)
         self.partitions.append(part)
         self._rebuild_groups_meta()
         self._sync_watcher_paths()
 
         has_bar = any(isinstance(w, AICapsuleBar) and w.show_search_pill for w in self.windows)
-        win = self._create_window_for_partition(part, is_first_bar=(part["kind"] == "bar" and not has_bar))
+        win = self._create_window_for_partition(part, is_first_bar=(norm_kind == "bar" and not has_bar))
         if isinstance(win, CollapsibleAuroraCard):
             win.pinned = True
         self.windows.append(win)
@@ -660,7 +722,8 @@ class AuroraController(QObject):
         if dlg.exec() != NewCapsuleDialog.Accepted:
             return
         title, kind = dlg.get_result()
-        self.add_partition(title, kind)
+        p_path, p_sort, p_max = dlg.get_portal_options()
+        self.add_partition(title, kind, portal_path=p_path, sort_by=p_sort, max_items=p_max)
 
     def update_partition(
         self,
@@ -670,6 +733,9 @@ class AuroraController(QObject):
         kind: str | None = None,
         badge: str | None = None,
         pinned: bool | None = None,
+        portal_path: str | None = None,
+        sort_by: str | None = None,
+        max_items: int | None = None,
     ):
         part = next((p for p in self.partitions if p["key"] == group_key), None)
         win = next((w for w in self.windows if w.group_key == group_key), None)
@@ -677,19 +743,27 @@ class AuroraController(QObject):
             return
 
         old_kind = part.get("kind", "card")
-        new_kind = kind if kind in ("card", "bar") else old_kind
+        new_kind = kind if kind in ("card", "bar", "portal") else old_kind
         if title:
             part["title"] = title
         part["kind"] = new_kind
         if new_kind == "bar":
             part["badge"] = (badge or part.get("badge") or part["title"][:2]).upper()
+        elif new_kind == "portal":
+            if portal_path:
+                part["portal_path"] = portal_path
+            if sort_by:
+                part["sort_by"] = sort_by
+            if max_items is not None:
+                part["max_items"] = int(max_items)
 
         if pinned is not None:
             self.config.setdefault("pinned", {})[group_key] = bool(pinned)
 
         self._rebuild_groups_meta()
+        self._sync_watcher_paths()
 
-        if new_kind != old_kind:
+        if new_kind != old_kind or (new_kind == "portal" and portal_path):
             self._build_all_windows()
             self._apply_initial_positions()
             if self.visible_state:
@@ -766,25 +840,30 @@ class AuroraController(QObject):
         if not part or not win:
             return
 
+        is_portal = part.get("kind") == "portal"
         box = QMessageBox(parent_widget)
         box.setStyleSheet(DIALOG_QSS)
         box.setWindowTitle("删除极光胶囊")
-        box.setText(f"确定要移除胶囊「{part['title']}」吗？\n（内部快捷方式将安全移入 Removed_Backup 备份夹，绝不删除原程序）")
+        if is_portal:
+            box.setText(f"确定要移除文件夹映射胶囊「{part['title']}」吗？\n（仅解除桌面胶囊映射，绝不修改或删除原文件夹内的任何文件）")
+        else:
+            box.setText(f"确定要移除胶囊「{part['title']}」吗？\n（内部快捷方式将安全移入 Removed_Backup 备份夹，绝不删除原程序）")
         btn_yes = box.addButton("确认移除", QMessageBox.AcceptRole)
         box.addButton("取消", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() != btn_yes:
             return
 
-        folder = GROUPS_DIR / part["folder"]
-        if folder.exists():
-            for item in list(folder.iterdir()):
-                if item.is_file() or item.is_dir():
-                    safe_remove_shortcut(item)
-            try:
-                folder.rmdir()
-            except OSError:
-                pass
+        if not is_portal:
+            folder = GROUPS_DIR / part["folder"]
+            if folder.exists():
+                for item in list(folder.iterdir()):
+                    if item.is_file() or item.is_dir():
+                        safe_remove_shortcut(item)
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
 
         self.partitions = [p for p in self.partitions if p["key"] != group_key]
         self.dragged_keys.discard(group_key)
@@ -823,9 +902,21 @@ class AuroraController(QObject):
     def open_partition_folder(self, group_key: str):
         part = next((p for p in self.partitions if p["key"] == group_key), None)
         if part:
-            folder = GROUPS_DIR / part["folder"]
-            folder.mkdir(parents=True, exist_ok=True)
-            subprocess.Popen(["explorer.exe", str(folder)])
+            folder = self._partition_folder(part)
+            if part.get("kind") != "portal":
+                folder.mkdir(parents=True, exist_ok=True)
+            if folder.exists():
+                subprocess.Popen(["explorer.exe", str(folder)])
+
+    def are_desktop_icons_hidden(self) -> bool:
+        return not are_system_desktop_icons_visible()
+
+    def set_hide_desktop_icons(self, hide: bool):
+        hide = bool(hide)
+        self.hide_desktop_icons = hide
+        set_system_desktop_icons_visible(not hide)
+        self._save_config()
+        self.stateChanged.emit()
 
     def open_data_root(self):
         subprocess.Popen(["explorer.exe", str(DATA_ROOT)])
@@ -955,12 +1046,12 @@ class AuroraController(QObject):
         self.stateChanged.emit()
 
     def _on_fs_changed(self):
-        known_folders = {p["folder"].lower() for p in self.partitions}
+        known_folders = {p["folder"].lower() for p in self.partitions if p.get("folder") and p.get("kind") != "portal"}
         added_new = False
         if GROUPS_DIR.exists():
             for sub in sorted(GROUPS_DIR.iterdir(), key=lambda x: x.name.lower()):
                 if sub.is_dir() and sub.name.lower() not in known_folders:
-                    clean_title = re.sub(r"^\d+[_-\s]*", "", sub.name).strip() or sub.name
+                    clean_title = re.sub(r"^\d+[_\s-]*", "", sub.name).strip() or sub.name
                     part = {
                         "key": f"CUSTOM_{sub.name.upper()}",
                         "title": clean_title,
@@ -1000,9 +1091,9 @@ class AuroraController(QObject):
 
     def get_all_hwnds(self) -> set[int]:
         hwnds = {int(w.winId()) for w in self._all_stackable_windows()}
-        if self.clock_widget.isVisible():
+        if hasattr(self, "clock_widget") and self.clock_widget.isVisible():
             hwnds.add(int(self.clock_widget.winId()))
-        if self.spotlight.isVisible():
+        if self.spotlight is not None and self.spotlight.isVisible():
             hwnds.add(int(self.spotlight.winId()))
         if self.settings_win is not None and self.settings_win.isVisible():
             hwnds.add(int(self.settings_win.winId()))
@@ -1015,11 +1106,22 @@ class AuroraController(QObject):
                 w.ensure_native_desktop_style()
         if self.clock_widget.isVisible():
             self.clock_widget.ensure_desktop_pinned()
+        if self.hide_desktop_icons is True:
+            set_system_desktop_icons_visible(False)
         self.taskbar_engine.apply_all()
         if hasattr(self, "tray") and not self.tray.isVisible():
             self.tray.show()
 
     def _enforce_all_bottom(self):
+        # Refresh Recycle Bin dynamic empty/full icon if state changed externally
+        rb_now, _, _ = query_recycle_bin_state()
+        if rb_now != self._last_rb_non_empty:
+            self._last_rb_non_empty = rb_now
+            for w in self.windows:
+                for tile in w.findChildren(AuroraIconTile):
+                    if tile._is_recycle_bin:
+                        tile.refresh_dynamic_icon()
+
         if self.clock_widget.isVisible():
             send_to_bottom(int(self.clock_widget.winId()))
         if not self.visible_state:
@@ -1267,6 +1369,9 @@ class AuroraController(QObject):
             self.toggle_all_visibility()
 
     def quit_app(self):
+        # Safely restore native Windows desktop icons if Aurora was hiding them
+        if self.hide_desktop_icons:
+            set_system_desktop_icons_visible(True)
         self.dbl_watcher.stop()
         self.ctrl_watcher.stop()
         self.hotkey_receiver.cleanup()

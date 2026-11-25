@@ -35,9 +35,15 @@ WM_WINDOWPOSCHANGING = 0x0046
 WM_MOUSEACTIVATE = 0x0021
 MA_NOACTIVATE = 3
 WM_SYSCOMMAND = 0x0112
+WM_COMMAND = 0x0111
 WM_HOTKEY = 0x0312
 SC_MINIMIZE = 0xF020
+SHELL_TOGGLE_DESKTOP_ICONS_CMD = 0x7402
 
+WS_EX_APPWINDOW = 0x00040000
+WS_EX_TRANSPARENT = 0x00000020
+
+DWMWA_CLOAKED = 14
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND = 2
@@ -267,6 +273,24 @@ user32.SetWindowCompositionAttribute.restype = wintypes.BOOL
 dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
+dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = LRESULT
+
+user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+user32.EnumWindows.restype = wintypes.BOOL
+
+user32.IsZoomed.argtypes = [wintypes.HWND]
+user32.IsZoomed.restype = wintypes.BOOL
+
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsIconic.restype = wintypes.BOOL
+
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
+
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
 user32.SetWindowsHookExW.restype = wintypes.HHOOK
 
@@ -358,6 +382,77 @@ def find_desktop_shell_host() -> tuple[int, int, int]:
 
     listview = user32.FindWindowExW(defview, None, "SysListView32", None) if defview else 0
     return (host or 0, defview or 0, listview or 0)
+
+
+def are_system_desktop_icons_visible() -> bool:
+    """Return True if Windows native desktop icons (SysListView32) are currently shown."""
+    _, _, listview = find_desktop_shell_host()
+    if not listview:
+        return True
+    return bool(user32.IsWindowVisible(listview))
+
+
+def set_system_desktop_icons_visible(visible: bool) -> bool:
+    """Idempotently show or hide Windows native desktop icons without touching any files."""
+    _, defview, listview = find_desktop_shell_host()
+    if not defview or not listview:
+        return False
+    cur = bool(user32.IsWindowVisible(listview))
+    if cur != bool(visible):
+        user32.SendMessageW(defview, WM_COMMAND, SHELL_TOGGLE_DESKTOP_ICONS_CMD, 0)
+    return bool(user32.IsWindowVisible(listview)) == bool(visible)
+
+
+_IGNORED_MAX_CLASSES = {
+    "Progman",
+    "WorkerW",
+    "SHELLDLL_DefView",
+    "SysListView32",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "Windows.UI.Core.CoreWindow",
+    "XamlExplorerHostIslandWindow",
+}
+
+
+def has_maximized_app_window(own_hwnds: set[int] | None = None) -> bool:
+    """Return True if any real, visible, uncloaked application window is currently maximized."""
+    skip = own_hwnds or set()
+    found = False
+
+    def _enum_cb(hwnd, _lparam):
+        nonlocal found
+        if not hwnd or hwnd in skip:
+            return True
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd) or not user32.IsZoomed(hwnd):
+            return True
+
+        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        if (ex & WS_EX_TOOLWINDOW) and not (ex & WS_EX_APPWINDOW):
+            return True
+        if (ex & WS_EX_TRANSPARENT) and (ex & WS_EX_NOACTIVATE):
+            return True
+
+        cls = get_window_class(hwnd)
+        if not cls or cls in _IGNORED_MAX_CLASSES:
+            return True
+
+        cloaked = ctypes.c_int(0)
+        hr = dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        if hr == 0 and cloaked.value != 0:
+            return True
+
+        rc = wintypes.RECT()
+        if user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+            if (rc.right - rc.left) < 500 or (rc.bottom - rc.top) < 350:
+                return True
+
+        found = True
+        return False  # Stop enumeration immediately on first match
+
+    cb = WNDENUMPROC(_enum_cb)
+    user32.EnumWindows(cb, 0)
+    return found
 
 
 def apply_dark_title_bar(hwnd: int):

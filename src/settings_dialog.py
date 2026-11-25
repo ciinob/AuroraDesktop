@@ -678,7 +678,17 @@ class AuroraSettingsWindow(QWidget):
         lay.addWidget(t)
         lay.addWidget(s)
 
-        c_boot, l_boot = _make_card("🚀 启动与桌面交互")
+        c_boot, l_boot = _make_card("🚀 启动与桌面接管")
+        self.sw_hide_desk_icons = AuroraToggleSwitch()
+        self.sw_hide_desk_icons.toggled.connect(
+            lambda v: not self._syncing and self.ctrl.set_hide_desktop_icons(v)
+        )
+        l_boot.addLayout(_make_setting_row(
+            "✨ 接管纯净桌面（隐藏 Windows 原生桌面图标）",
+            "一键隐藏原本杂乱的系统桌面图标，壁纸 100% 纯净通透（绝不删改文件；关闭此开关或退出程序时自动无损还原）",
+            self.sw_hide_desk_icons,
+        ))
+
         self.sw_autorun = AuroraToggleSwitch()
         self.sw_autorun.toggled.connect(self._on_autorun_toggled)
         l_boot.addLayout(_make_setting_row(
@@ -829,11 +839,40 @@ class AuroraSettingsWindow(QWidget):
         self.combo_grp_kind = QComboBox()
         self.combo_grp_kind.addItem("🧊 可折叠极光卡片（5 列网格，支持自动卷起）", "card")
         self.combo_grp_kind.addItem("💊 横向单行悬浮胶囊栏（紧凑单行徽标栏）", "bar")
+        self.combo_grp_kind.addItem("📂 文件夹实时映射胶囊（Folder Portal · 实时同步本地目录）", "portal")
 
         self.lbl_grp_badge = QLabel("左侧徽标文字（1~3 字符，仅横向胶囊栏显示）：")
         self.edit_grp_badge = QLineEdit()
         self.edit_grp_badge.setMaxLength(4)
         self.edit_grp_badge.setPlaceholderText("如 AI / DEV")
+
+        # Portal-specific inspector controls
+        self.portal_props_wrap = QWidget()
+        pp_lay = QVBoxLayout(self.portal_props_wrap)
+        pp_lay.setContentsMargins(0, 2, 0, 2)
+        pp_lay.setSpacing(8)
+        pp_lay.addWidget(QLabel("实时映射源目录（新增/删除文件将自动同步展示）："))
+        pp_path_row = QHBoxLayout()
+        pp_path_row.setSpacing(6)
+        self.edit_grp_portal_path = QLineEdit()
+        btn_pp_browse = QPushButton("浏览...")
+        btn_pp_browse.clicked.connect(self._browse_grp_portal_path)
+        pp_path_row.addWidget(self.edit_grp_portal_path, 1)
+        pp_path_row.addWidget(btn_pp_browse)
+        pp_lay.addLayout(pp_path_row)
+
+        pp_opt_row = QHBoxLayout()
+        pp_opt_row.setSpacing(8)
+        self.combo_grp_portal_sort = QComboBox()
+        self.combo_grp_portal_sort.addItem("🕒 最新修改优先", "mtime_desc")
+        self.combo_grp_portal_sort.addItem("📁 文件夹优先", "dirs_first")
+        self.combo_grp_portal_sort.addItem("🔤 按名称排序", "name_asc")
+        self.combo_grp_portal_max = QComboBox()
+        for cnt_v in (10, 15, 20, 30, 50):
+            self.combo_grp_portal_max.addItem(f"最多显示 {cnt_v} 项", cnt_v)
+        pp_opt_row.addWidget(self.combo_grp_portal_sort, 3)
+        pp_opt_row.addWidget(self.combo_grp_portal_max, 2)
+        pp_lay.addLayout(pp_opt_row)
 
         self.sw_grp_pin = AuroraToggleSwitch()
         self.row_grp_pin_wrap = QWidget()
@@ -854,6 +893,7 @@ class AuroraSettingsWindow(QWidget):
         d_lay.addWidget(self.combo_grp_kind)
         d_lay.addWidget(self.lbl_grp_badge)
         d_lay.addWidget(self.edit_grp_badge)
+        d_lay.addWidget(self.portal_props_wrap)
         d_lay.addWidget(self.row_grp_pin_wrap)
         d_lay.addWidget(self.btn_save_grp)
         d_lay.addSpacing(8)
@@ -864,14 +904,14 @@ class AuroraSettingsWindow(QWidget):
 
         g_act_row = QHBoxLayout()
         g_act_row.setSpacing(8)
-        b_add_file = QPushButton("➕ 添加应用/文件...")
-        b_add_file.clicked.connect(self._on_add_files_to_selected_group)
-        b_add_dir = QPushButton("📁 添加文件夹...")
-        b_add_dir.clicked.connect(self._on_add_dir_to_selected_group)
+        self.btn_grp_add_file = QPushButton("➕ 添加应用/文件...")
+        self.btn_grp_add_file.clicked.connect(self._on_add_files_to_selected_group)
+        self.btn_grp_add_dir = QPushButton("📁 添加文件夹...")
+        self.btn_grp_add_dir.clicked.connect(self._on_add_dir_to_selected_group)
         b_open_dir = QPushButton("📂 打开文件夹")
         b_open_dir.clicked.connect(self._on_open_selected_group_folder)
-        g_act_row.addWidget(b_add_file)
-        g_act_row.addWidget(b_add_dir)
+        g_act_row.addWidget(self.btn_grp_add_file)
+        g_act_row.addWidget(self.btn_grp_add_dir)
         g_act_row.addWidget(b_open_dir)
         d_lay.addLayout(g_act_row)
 
@@ -879,9 +919,9 @@ class AuroraSettingsWindow(QWidget):
         self.btn_add_sys_item.clicked.connect(self._on_add_system_item_menu)
         d_lay.addWidget(self.btn_add_sys_item)
 
-        jump_btn = QPushButton("🎨 前往「图标自定义」管理此分组内的图标 →")
-        jump_btn.clicked.connect(self._jump_to_group_icons)
-        d_lay.addWidget(jump_btn)
+        self.btn_jump_icons = QPushButton("🎨 前往「图标自定义」管理此分组内的图标 →")
+        self.btn_jump_icons.clicked.connect(self._jump_to_group_icons)
+        d_lay.addWidget(self.btn_jump_icons)
         d_lay.addStretch(1)
 
         split.addLayout(left_col, 5)
@@ -896,7 +936,8 @@ class AuroraSettingsWindow(QWidget):
 
         target_row = 0
         for i, p in enumerate(self.ctrl.partitions):
-            kind_tag = "胶囊栏" if p.get("kind") == "bar" else "折叠卡"
+            pk = p.get("kind", "card")
+            kind_tag = "胶囊栏" if pk == "bar" else ("📂映射" if pk == "portal" else "折叠卡")
             cnt = len(self.ctrl.get_partition_items(p["key"]))
             item = QListWidgetItem(f"[{kind_tag}]  {p['title']}   ({cnt} 项)")
             item.setData(Qt.UserRole, p["key"])
@@ -923,11 +964,24 @@ class AuroraSettingsWindow(QWidget):
         p = self.ctrl.partitions[row]
         self._selected_group_key = p["key"]
         self.edit_grp_title.setText(p["title"])
-        kind_idx = 1 if p.get("kind") == "bar" else 0
+        pk = p.get("kind", "card")
+        kind_idx = 1 if pk == "bar" else (2 if pk == "portal" else 0)
         self.combo_grp_kind.blockSignals(True)
         self.combo_grp_kind.setCurrentIndex(kind_idx)
         self.combo_grp_kind.blockSignals(False)
         self.edit_grp_badge.setText(p.get("badge") or p["title"][:2].upper())
+        default_dl = Path.home() / "Downloads"
+        self.edit_grp_portal_path.setText(p.get("portal_path") or str(default_dl if default_dl.exists() else Path.home()))
+        cur_sort = p.get("sort_by", "mtime_desc")
+        for i in range(self.combo_grp_portal_sort.count()):
+            if self.combo_grp_portal_sort.itemData(i) == cur_sort:
+                self.combo_grp_portal_sort.setCurrentIndex(i)
+                break
+        cur_max = int(p.get("max_items") or 15)
+        for i in range(self.combo_grp_portal_max.count()):
+            if int(self.combo_grp_portal_max.itemData(i)) == cur_max:
+                self.combo_grp_portal_max.setCurrentIndex(i)
+                break
         self.sw_grp_pin.setChecked(self.ctrl.is_partition_pinned(p["key"]))
         self._update_grp_kind_visibility()
 
@@ -935,11 +989,24 @@ class AuroraSettingsWindow(QWidget):
         self.btn_grp_down.setEnabled(row < len(self.ctrl.partitions) - 1)
         self.btn_grp_del.setEnabled(len(self.ctrl.partitions) > 1)
 
+    def _browse_grp_portal_path(self):
+        cur = self.edit_grp_portal_path.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "选择要实时映射的本地目录", cur)
+        if chosen:
+            self.edit_grp_portal_path.setText(chosen)
+
     def _update_grp_kind_visibility(self):
-        is_bar = self.combo_grp_kind.currentData() == "bar"
+        cur_k = self.combo_grp_kind.currentData()
+        is_bar = cur_k == "bar"
+        is_portal = cur_k == "portal"
         self.lbl_grp_badge.setVisible(is_bar)
         self.edit_grp_badge.setVisible(is_bar)
+        self.portal_props_wrap.setVisible(is_portal)
         self.row_grp_pin_wrap.setVisible(not is_bar)
+        self.btn_grp_add_file.setVisible(not is_portal)
+        self.btn_grp_add_dir.setVisible(not is_portal)
+        self.btn_add_sys_item.setVisible(not is_portal)
+        self.btn_jump_icons.setVisible(not is_portal)
 
     def _on_save_group_props(self):
         if not self._selected_group_key:
@@ -949,6 +1016,10 @@ class AuroraSettingsWindow(QWidget):
             self.edit_grp_title.setFocus()
             return
         kind = str(self.combo_grp_kind.currentData())
+        p_path = self.edit_grp_portal_path.text().strip()
+        if kind == "portal" and (not p_path or not Path(p_path).is_dir()):
+            self.edit_grp_portal_path.setFocus()
+            return
         badge = self.edit_grp_badge.text().strip() or title[:2].upper()
         pinned = self.sw_grp_pin.isChecked()
         self.ctrl.update_partition(
@@ -957,6 +1028,9 @@ class AuroraSettingsWindow(QWidget):
             kind=kind,
             badge=badge,
             pinned=pinned,
+            portal_path=p_path if kind == "portal" else None,
+            sort_by=str(self.combo_grp_portal_sort.currentData() or "mtime_desc"),
+            max_items=int(self.combo_grp_portal_max.currentData() or 15),
         )
 
     def _on_create_group(self):
@@ -964,7 +1038,8 @@ class AuroraSettingsWindow(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         title, kind = dlg.get_result()
-        part = self.ctrl.add_partition(title, kind)
+        p_path, p_sort, p_max = dlg.get_portal_options()
+        part = self.ctrl.add_partition(title, kind, portal_path=p_path, sort_by=p_sort, max_items=p_max)
         self._selected_group_key = part["key"]
         self.refresh_all()
 
@@ -1135,7 +1210,8 @@ class AuroraSettingsWindow(QWidget):
         self.combo_icon_group_filter.clear()
         self.combo_icon_group_filter.addItem("📚 全部分组图标", "__ALL__")
         restore_idx = 0
-        for idx, p in enumerate(self.ctrl.partitions, start=1):
+        managed_parts = [p for p in self.ctrl.partitions if p.get("kind") != "portal"]
+        for idx, p in enumerate(managed_parts, start=1):
             self.combo_icon_group_filter.addItem(f"{p['title']}", p["key"])
             if p["key"] == cur_filter:
                 restore_idx = idx
@@ -1143,7 +1219,7 @@ class AuroraSettingsWindow(QWidget):
         self.combo_icon_group_filter.blockSignals(False)
 
         self.combo_item_move.clear()
-        for p in self.ctrl.partitions:
+        for p in managed_parts:
             self.combo_item_move.addItem(p["title"], p["key"])
 
         self._populate_items_list()
@@ -1159,6 +1235,8 @@ class AuroraSettingsWindow(QWidget):
         selected_row = -1
         row_idx = 0
         for p in self.ctrl.partitions:
+            if p.get("kind") == "portal":
+                continue
             if grp_filter != "__ALL__" and p["key"] != grp_filter:
                 continue
             for item_path in self.ctrl.get_partition_items(p["key"]):
@@ -1495,6 +1573,16 @@ class AuroraSettingsWindow(QWidget):
         )
         l_tb.addLayout(_make_setting_row("任务栏视觉模式", "无需 TranslucentTB，原生注入 Explorer XAML 渲染树消除黑底", self.combo_tb_mode))
 
+        self.sw_tb_max_acrylic = AuroraToggleSwitch()
+        self.sw_tb_max_acrylic.toggled.connect(
+            lambda v: not self._syncing and self.ctrl.taskbar_engine._set_max_win_acrylic(v)
+        )
+        l_tb.addLayout(_make_setting_row(
+            "窗口最大化时自动切换深色毛玻璃",
+            "桌面无遮挡时保持全透明看壁纸；当任意窗口全屏最大化时自动切换深色毛玻璃，防止白底网页刺眼看不清图标",
+            self.sw_tb_max_acrylic,
+        ))
+
         self.sw_tb_line = AuroraToggleSwitch()
         self.sw_tb_line.toggled.connect(lambda v: not self._syncing and self.ctrl.taskbar_engine._set_show_line(v))
         l_tb.addLayout(_make_setting_row("保留任务栏顶部 1px 分割细线", "关闭时壁纸从屏幕顶部无缝贯穿到底部", self.sw_tb_line))
@@ -1534,6 +1622,7 @@ class AuroraSettingsWindow(QWidget):
             if self.combo_tb_mode.itemData(i) == tc.get("mode", "clear"):
                 self.combo_tb_mode.setCurrentIndex(i)
                 break
+        self.sw_tb_max_acrylic.setChecked(bool(tc.get("max_win_acrylic", False)))
         self.sw_tb_line.setChecked(bool(tc.get("show_line", False)))
 
     # =========================================================================
@@ -1551,6 +1640,7 @@ class AuroraSettingsWindow(QWidget):
         self._syncing = True
         try:
             self._sync_vis_btn()
+            self.sw_hide_desk_icons.setChecked(self.ctrl.are_desktop_icons_hidden())
             self.sw_autorun.setChecked(self.ctrl.is_autorun_enabled())
             self.sw_dbl_hide.setChecked(self.ctrl.double_click_hide)
             self.sw_lock_pos.setChecked(self.ctrl.lock_positions)

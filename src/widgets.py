@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 from animator import HighRefreshAnimation
-from icon_extractor import ShortcutIconLoader, format_display_name
+from icon_extractor import ShortcutIconLoader, format_display_name, is_recycle_bin_item, query_recycle_bin_state
 from paths import DATA_ROOT
 from win32_utils import (
     ASFW_ANY,
@@ -181,17 +181,7 @@ def import_shell_idlist_drop(mime_data: QMimeData, dest_folder: Path) -> bool:
 
 
 def is_recycle_bin_shortcut(item_path: Path) -> bool:
-    if item_path.stem.lower() in ("回收站", "recycle bin"):
-        return True
-    if item_path.suffix.lower() == ".lnk":
-        try:
-            shell = win32com.client.Dispatch("WScript.Shell")
-            sc = shell.CreateShortcut(str(item_path))
-            if "645ff040-5081-101b-9f08-00aa002f954e" in (sc.Arguments or "").lower():
-                return True
-        except Exception:
-            pass
-    return False
+    return is_recycle_bin_item(item_path)
 
 # Aurora color palettes: (Primary, Mid, Secondary, Display Label)
 AURORA_THEMES: dict[str, tuple[QColor, QColor, QColor, str]] = {
@@ -306,26 +296,53 @@ QPushButton#primaryBtn:hover {
 
 
 class NewCapsuleDialog(QDialog):
-    """Apple-dark styled modal dialog to create a new Aurora capsule card or compact bar."""
+    """Apple-dark styled modal dialog to create a capsule card, compact bar, or live Folder Portal."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("新建极光胶囊分区")
-        self.setFixedSize(380, 210)
+        self.setFixedWidth(430)
         self.setStyleSheet(DIALOG_QSS)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
-        lbl_name = QLabel("胶囊分区名称（支持中英文）：")
-        self.edit_name = QLineEdit()
-        self.edit_name.setPlaceholderText("例如：ACADEMIC / 文献阅读 / 常用设计")
-
         lbl_kind = QLabel("选择胶囊形态：")
         self.combo_kind = QComboBox()
-        self.combo_kind.addItem("可折叠极光卡片（离开 0.5s 自动卷起为胶囊）", "card")
-        self.combo_kind.addItem("横向单行悬浮胶囊栏（类似顶部 AI 栏，一触即达）", "bar")
+        self.combo_kind.addItem("🧊 可折叠极光卡片（自动卷起为胶囊）", "card")
+        self.combo_kind.addItem("💊 横向单行悬浮胶囊栏（类似顶部 AI 栏）", "bar")
+        self.combo_kind.addItem("📂 文件夹实时映射胶囊（Folder Portal · 同步最新文件）", "portal")
+
+        lbl_name = QLabel("胶囊分区名称（支持中英文）：")
+        self.edit_name = QLineEdit()
+        self.edit_name.setPlaceholderText("例如：ACADEMIC / 下载夹 / 近期截图")
+
+        # Portal-specific options container
+        self.portal_box = QWidget()
+        p_lay = QVBoxLayout(self.portal_box)
+        p_lay.setContentsMargins(0, 2, 0, 2)
+        p_lay.setSpacing(8)
+        p_lay.addWidget(QLabel("选择要实时映射的本地文件夹："))
+        path_row = QHBoxLayout()
+        path_row.setSpacing(6)
+        default_dl = Path.home() / "Downloads"
+        self.edit_portal_path = QLineEdit(str(default_dl if default_dl.exists() else Path.home()))
+        btn_browse = QPushButton("浏览...")
+        btn_browse.clicked.connect(self._browse_portal_dir)
+        path_row.addWidget(self.edit_portal_path, 1)
+        path_row.addWidget(btn_browse)
+        p_lay.addLayout(path_row)
+
+        p_lay.addWidget(QLabel("文件排序方式："))
+        self.combo_portal_sort = QComboBox()
+        self.combo_portal_sort.addItem("🕒 最新修改优先（推荐下载夹 / 截图夹）", "mtime_desc")
+        self.combo_portal_sort.addItem("📁 文件夹优先 + 最新修改", "dirs_first")
+        self.combo_portal_sort.addItem("🔤 按名称字母排序", "name_asc")
+        p_lay.addWidget(self.combo_portal_sort)
+        self.portal_box.setVisible(False)
+
+        self.combo_kind.currentIndexChanged.connect(self._on_kind_changed)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -338,14 +355,40 @@ class NewCapsuleDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_ok)
 
-        layout.addWidget(lbl_name)
-        layout.addWidget(self.edit_name)
         layout.addWidget(lbl_kind)
         layout.addWidget(self.combo_kind)
+        layout.addWidget(lbl_name)
+        layout.addWidget(self.edit_name)
+        layout.addWidget(self.portal_box)
         layout.addStretch(1)
         layout.addLayout(btn_row)
+        self.adjustSize()
+
+    def _on_kind_changed(self):
+        is_portal = self.combo_kind.currentData() == "portal"
+        self.portal_box.setVisible(is_portal)
+        if is_portal and not self.edit_name.text().strip():
+            p = Path(self.edit_portal_path.text().strip())
+            if p.name:
+                self.edit_name.setText(p.name)
+        self.adjustSize()
+
+    def _browse_portal_dir(self):
+        cur = self.edit_portal_path.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "选择要实时映射的文件夹", cur)
+        if chosen:
+            self.edit_portal_path.setText(chosen)
+            if not self.edit_name.text().strip():
+                self.edit_name.setText(Path(chosen).name or chosen)
 
     def _on_accept(self):
+        if self.combo_kind.currentData() == "portal":
+            p_str = self.edit_portal_path.text().strip()
+            if not p_str or not Path(p_str).is_dir():
+                self.edit_portal_path.setFocus()
+                return
+            if not self.edit_name.text().strip():
+                self.edit_name.setText(Path(p_str).name or "Folder Portal")
         if not self.edit_name.text().strip():
             self.edit_name.setFocus()
             return
@@ -353,6 +396,13 @@ class NewCapsuleDialog(QDialog):
 
     def get_result(self) -> tuple[str, str]:
         return self.edit_name.text().strip(), str(self.combo_kind.currentData())
+
+    def get_portal_options(self) -> tuple[str, str, int]:
+        return (
+            self.edit_portal_path.text().strip(),
+            str(self.combo_portal_sort.currentData() or "mtime_desc"),
+            15,
+        )
 
 
 def make_apple_font(pixel_size: int, weight: QFont.Weight = QFont.Medium, letter_spacing: float = 0.0) -> QFont:
@@ -479,6 +529,8 @@ def open_target_location(path: Path, icon_loader: ShortcutIconLoader):
 
 
 HIDDEN_SKIP_FILES = {"desktop.ini", "thumbs.db", ".ds_store"}
+PORTAL_SKIP_EXTS = {".tmp", ".crdownload", ".part", ".partial", ".opdownload"}
+FILE_ATTR_HIDDEN_OR_SYS = 0x02 | 0x04
 
 
 def list_valid_partition_items(folder_path: Path) -> list[Path]:
@@ -488,6 +540,43 @@ def list_valid_partition_items(folder_path: Path) -> list[Path]:
         p for p in folder_path.iterdir()
         if p.name.lower() not in HIDDEN_SKIP_FILES and not p.name.startswith(".")
     ]
+
+
+def list_portal_items(folder_path: Path, sort_by: str = "mtime_desc", max_items: int = 15) -> list[Path]:
+    """Fast single-pass directory scanner for Folder Portal capsules (safe on 5,000+ file folders)."""
+    if not folder_path.is_dir():
+        return []
+    records: list[tuple[str, bool, float, Path]] = []
+    try:
+        with os.scandir(folder_path) as it:
+            for entry in it:
+                name = entry.name
+                low = name.lower()
+                if low in HIDDEN_SKIP_FILES or name.startswith(".") or name.startswith("~$"):
+                    continue
+                if any(low.endswith(ext) for ext in PORTAL_SKIP_EXTS):
+                    continue
+                try:
+                    st = entry.stat()
+                    if getattr(st, "st_file_attributes", 0) & FILE_ATTR_HIDDEN_OR_SYS:
+                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    mtime = float(st.st_mtime)
+                except OSError:
+                    continue
+                records.append((low, is_dir, mtime, Path(entry.path)))
+    except OSError:
+        return []
+
+    if sort_by == "name_asc":
+        records.sort(key=lambda r: r[0])
+    elif sort_by == "dirs_first":
+        records.sort(key=lambda r: (0 if r[1] else 1, -r[2], r[0]))
+    else:
+        records.sort(key=lambda r: (-r[2], r[0]))
+
+    limit = max(1, int(max_items or 15))
+    return [r[3] for r in records[:limit]]
 
 
 def import_item_into_group_folder(src_path: Path, dest_folder: Path) -> Path | None:
@@ -566,6 +655,7 @@ class AuroraIconTile(QWidget):
         compact_capsule: bool = False,
         all_groups: dict[str, tuple[str, Path]] | None = None,
         current_group_key: str = "",
+        is_portal_item: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -574,6 +664,8 @@ class AuroraIconTile(QWidget):
         self.compact_capsule = compact_capsule
         self.all_groups = all_groups or {}
         self.current_group_key = current_group_key
+        self.is_portal_item = is_portal_item
+        self._is_recycle_bin = (not is_portal_item) and is_recycle_bin_shortcut(item_path)
 
         self.short_name, self.full_name = format_display_name(item_path)
         self.icon_size = 34 if compact_capsule else 36
@@ -619,7 +711,23 @@ class AuroraIconTile(QWidget):
         self._ripple_active = False
         self.update()
 
+    def refresh_dynamic_icon(self):
+        new_pm = self.icon_loader.get_icon_pixmap(self.item_path, self.icon_size * 2)
+        if not new_pm.isNull():
+            self.pixmap = new_pm
+            self.accent_color = extract_vibrant_accent(self.pixmap)
+            self.update()
+
     def enterEvent(self, event):
+        if self._is_recycle_bin:
+            has_items, cnt, sz_bytes = query_recycle_bin_state()
+            if has_items:
+                sz_mb = sz_bytes / (1024 * 1024)
+                sz_txt = f"{sz_mb:.1f} MB" if sz_mb >= 0.1 else f"{max(1, sz_bytes // 1024)} KB"
+                self.setToolTip(f"回收站 · 共 {cnt} 项 ({sz_txt})")
+            else:
+                self.setToolTip("回收站 · 空")
+            self.refresh_dynamic_icon()
         self._anim.stop()
         self._anim.setStartValue(self._hover_progress)
         self._anim.setEndValue(1.0)
@@ -658,15 +766,16 @@ class AuroraIconTile(QWidget):
     def _start_tile_drag(self):
         drag = QDrag(self)
         mime = QMimeData()
-        payload = f"{self.current_group_key}|{self.item_path}".encode("utf-8")
-        mime.setData(AURORA_MIME_TYPE, payload)
+        if not self.is_portal_item:
+            payload = f"{self.current_group_key}|{self.item_path}".encode("utf-8")
+            mime.setData(AURORA_MIME_TYPE, payload)
         mime.setUrls([QUrl.fromLocalFile(str(self.item_path))])
         drag.setMimeData(mime)
         if not self.pixmap.isNull():
             drag_pm = self.pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             drag.setPixmap(drag_pm)
             drag.setHotSpot(QPoint(20, 20))
-        drag.exec(Qt.MoveAction | Qt.CopyAction)
+        drag.exec(Qt.CopyAction if self.is_portal_item else (Qt.MoveAction | Qt.CopyAction))
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -696,24 +805,32 @@ class AuroraIconTile(QWidget):
 
         act_open = menu.addAction(f"打开 {self.short_name}")
         act_empty_bin = None
-        if is_recycle_bin_shortcut(self.item_path):
-            act_empty_bin = menu.addAction("🧹 清空回收站...")
-        act_admin = menu.addAction("以管理员身份运行")
-        act_loc = menu.addAction("打开文件所在位置")
-        menu.addSeparator()
-
-        act_custom = menu.addAction("🖼️ 自定义图标 / 重命名...")
-
-        move_menu = menu.addMenu("移至其他极光分区")
-        move_menu.setStyleSheet(MENU_QSS)
+        if self._is_recycle_bin:
+            has_rb, _, _ = query_recycle_bin_state()
+            act_empty_bin = menu.addAction("🧹 清空回收站..." if has_rb else "🧹 回收站已是空的")
+            act_empty_bin.setEnabled(has_rb)
+        act_admin = None
+        if not self.is_portal_item or self.item_path.suffix.lower() in (".exe", ".bat", ".cmd", ".lnk"):
+            act_admin = menu.addAction("以管理员身份运行")
+        act_loc = menu.addAction("在资源管理器中定位")
+        act_copy_path = None
+        act_custom = None
         move_actions: dict[QAction, str] = {}
-        for g_key, (g_title, _) in self.all_groups.items():
-            if g_key != self.current_group_key:
-                a = move_menu.addAction(g_title)
-                move_actions[a] = g_key
+        act_remove = None
 
-        menu.addSeparator()
-        act_remove = menu.addAction("从此分区移除图标")
+        if self.is_portal_item:
+            act_copy_path = menu.addAction("复制完整文件路径")
+        else:
+            menu.addSeparator()
+            act_custom = menu.addAction("🖼️ 自定义图标 / 重命名...")
+            move_menu = menu.addMenu("移至其他极光分区")
+            move_menu.setStyleSheet(MENU_QSS)
+            for g_key, (g_title, _) in self.all_groups.items():
+                if g_key != self.current_group_key:
+                    a = move_menu.addAction(g_title)
+                    move_actions[a] = g_key
+            menu.addSeparator()
+            act_remove = menu.addAction("从此分区移除图标")
 
         chosen = menu.exec(event.globalPos())
         if hasattr(parent_card, "set_menu_open"):
@@ -723,15 +840,18 @@ class AuroraIconTile(QWidget):
             launch_item(self.item_path)
         elif act_empty_bin is not None and chosen == act_empty_bin:
             shell32.SHEmptyRecycleBinW(None, None, 0)
-        elif chosen == act_admin:
+            QTimer.singleShot(150, self.refresh_dynamic_icon)
+        elif act_admin is not None and chosen == act_admin:
             launch_item(self.item_path, run_as_admin=True)
         elif chosen == act_loc:
             open_target_location(self.item_path, self.icon_loader)
-        elif chosen == act_custom:
+        elif act_copy_path is not None and chosen == act_copy_path:
+            QApplication.clipboard().setText(str(self.item_path))
+        elif act_custom is not None and chosen == act_custom:
             self.customizeRequested.emit(self.item_path)
         elif chosen in move_actions:
             self.moveRequested.emit(self.item_path, move_actions[chosen])
-        elif chosen == act_remove:
+        elif act_remove is not None and chosen == act_remove:
             safe_remove_shortcut(self.item_path)
             if hasattr(parent_card, "reload_items"):
                 parent_card.reload_items()
@@ -1309,6 +1429,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         theme_provider=None,
         opacity_provider=None,
         custom_order_provider=None,
+        is_portal: bool = False,
+        portal_sort_provider=None,
+        portal_max_provider=None,
     ):
         super().__init__(
             allow_drag_provider=allow_drag_provider,
@@ -1322,7 +1445,10 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self.header_font_family = header_font_family
         self.all_groups = all_groups
         self.pinned = pinned
+        self.is_portal = is_portal
         self._custom_order_provider = custom_order_provider or (lambda _: [])
+        self._portal_sort_provider = portal_sort_provider or (lambda _: "mtime_desc")
+        self._portal_max_provider = portal_max_provider or (lambda _: 15)
 
         self._expanded = True
         self._item_count = 0
@@ -1337,7 +1463,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self.setFixedWidth(self.CARD_WIDTH)
         self.setMinimumHeight(self.HEADER_HEIGHT)
         self.setMaximumHeight(2000)
-        self.setAcceptDrops(True)
+        self.setAcceptDrops(not self.is_portal)
 
         self._grid_container = QWidget(self)
         self._grid_container.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -1363,8 +1489,15 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         for child in self._grid_container.findChildren(AuroraIconTile):
             child.deleteLater()
 
-        files = list_valid_partition_items(self.folder_path)
-        files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
+        if self.is_portal:
+            files = list_portal_items(
+                self.folder_path,
+                sort_by=self._portal_sort_provider(self.group_key),
+                max_items=self._portal_max_provider(self.group_key),
+            )
+        else:
+            files = list_valid_partition_items(self.folder_path)
+            files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
         self._item_count = len(files)
 
         rows = max(1, math.ceil(len(files) / self.COLS))
@@ -1381,6 +1514,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 compact_capsule=False,
                 all_groups=self.all_groups,
                 current_group_key=self.group_key,
+                is_portal_item=self.is_portal,
                 parent=self._grid_container,
             )
             x = self.GRID_PAD_X + c * (self.TILE_W + self.GRID_SPACING_X)
@@ -1549,12 +1683,21 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         act_pin = menu.addAction(pin_label)
         act_toggle = menu.addAction("立即卷起为胶囊" if self._expanded else "展开卡片")
         menu.addSeparator()
-        act_add = menu.addAction("➕ 添加应用 / 文件...")
-        act_add_dir = menu.addAction("📁 添加文件夹...")
-        sys_menu = menu.addMenu("🖥️ 添加系统图标 (此电脑 / 回收站)")
-        sys_menu.setStyleSheet(MENU_QSS)
-        sys_actions = {sys_menu.addAction(v["label"]): k for k, v in SYSTEM_SHELL_ITEMS.items()}
-        act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
+
+        act_add = None
+        act_add_dir = None
+        sys_actions: dict[QAction, str] = {}
+        act_refresh_portal = None
+        if self.is_portal:
+            act_folder = menu.addAction(f"📂 打开映射源目录 ({self.folder_path.name})")
+            act_refresh_portal = menu.addAction("🔄 立即刷新目录文件")
+        else:
+            act_add = menu.addAction("➕ 添加应用 / 文件...")
+            act_add_dir = menu.addAction("📁 添加文件夹...")
+            sys_menu = menu.addMenu("🖥️ 添加系统图标 (此电脑 / 回收站)")
+            sys_menu.setStyleSheet(MENU_QSS)
+            sys_actions = {sys_menu.addAction(v["label"]): k for k, v in SYSTEM_SHELL_ITEMS.items()}
+            act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
         menu.addSeparator()
         act_settings = menu.addAction("⚙️ 管理此分组 / 打开设置中心...")
         act_hide = menu.addAction("🙈 隐藏全部桌面卡片")
@@ -1571,15 +1714,17 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 self.collapse_card(force=True)
             else:
                 self.expand_card()
-        elif chosen == act_add:
+        elif act_add is not None and chosen == act_add:
             if prompt_add_items_to_folder(self, self.folder_path):
                 self.reload_items()
-        elif chosen == act_add_dir:
+        elif act_add_dir is not None and chosen == act_add_dir:
             if prompt_add_directory_to_folder(self, self.folder_path):
                 self.reload_items()
         elif chosen in sys_actions:
             if create_system_shell_shortcut(sys_actions[chosen], self.folder_path):
                 self.reload_items()
+        elif act_refresh_portal is not None and chosen == act_refresh_portal:
+            self.reload_items()
         elif chosen == act_folder:
             subprocess.Popen(["explorer.exe", str(self.folder_path)])
         elif chosen == act_settings:
@@ -1634,14 +1779,21 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
 
         c1, _, c2 = self.get_theme_colors()
 
-        # 1. Glowing Aurora dot indicator on header left
-        dot_rect = QRectF(14.0, (self.HEADER_HEIGHT - 7.0) / 2.0, 7.0, 7.0)
-        dot_grad = QLinearGradient(dot_rect.topLeft(), dot_rect.bottomRight())
-        dot_grad.setColorAt(0.0, c1)
-        dot_grad.setColorAt(1.0, c2)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(dot_grad)
-        painter.drawEllipse(dot_rect)
+        # 1. Glowing Aurora indicator on header left (rounded folder badge for Portal, dot for standard card)
+        if self.is_portal:
+            p_rect = QRectF(12.0, (self.HEADER_HEIGHT - 10.0) / 2.0, 11.0, 9.0)
+            painter.setPen(QPen(c1, 1.3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(p_rect, 2.0, 2.0)
+            painter.drawLine(QPointF(13.5, p_rect.top() - 1.5), QPointF(17.5, p_rect.top() - 1.5))
+        else:
+            dot_rect = QRectF(14.0, (self.HEADER_HEIGHT - 7.0) / 2.0, 7.0, 7.0)
+            dot_grad = QLinearGradient(dot_rect.topLeft(), dot_rect.bottomRight())
+            dot_grad.setColorAt(0.0, c1)
+            dot_grad.setColorAt(1.0, c2)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(dot_grad)
+            painter.drawEllipse(dot_rect)
 
         # 2. Apple Widget style crisp SemiBold sans-serif category title
         font = make_apple_font(12, QFont.DemiBold, 0.65)

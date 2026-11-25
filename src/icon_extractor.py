@@ -43,6 +43,44 @@ shell32.SHGetFileInfoW.restype = ctypes.c_size_t
 SHGFI_ICON = 0x000000100
 SHGFI_LARGEICON = 0x000000000
 
+
+class SHQUERYRBINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("i64Size", ctypes.c_int64),
+        ("i64NumItems", ctypes.c_int64),
+    ]
+
+
+shell32.SHQueryRecycleBinW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SHQUERYRBINFO)]
+shell32.SHQueryRecycleBinW.restype = ctypes.c_long
+
+
+def query_recycle_bin_state() -> tuple[bool, int, int]:
+    """Return (has_items, item_count, total_bytes) for the Windows Recycle Bin."""
+    info = SHQUERYRBINFO()
+    info.cbSize = ctypes.sizeof(SHQUERYRBINFO)
+    hr = shell32.SHQueryRecycleBinW(None, ctypes.byref(info))
+    if hr == 0:
+        cnt = max(0, int(info.i64NumItems))
+        sz = max(0, int(info.i64Size))
+        return (cnt > 0 or sz > 0), cnt, sz
+    return False, 0, 0
+
+
+def is_recycle_bin_item(item_path: Path) -> bool:
+    if item_path.stem.lower() in ("回收站", "recycle bin"):
+        return True
+    if item_path.suffix.lower() == ".lnk":
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            sc = shell.CreateShortcut(str(item_path))
+            if "645ff040-5081-101b-9f08-00aa002f954e" in (sc.Arguments or "").lower():
+                return True
+        except Exception:
+            pass
+    return False
+
 # Clean concise display name aliases for long desktop shortcut names
 CLEAN_NAME_MAP = {
     "plain craft launcher 2 - 快捷方式": "PCL 2",
@@ -278,6 +316,19 @@ class ShortcutIconLoader:
             if not pm.isNull():
                 scaled = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._mem_cache[cache_key] = scaled
+                return scaled
+
+        # Live empty / full icon state for Recycle Bin shortcuts (unless user set a custom icon)
+        if is_recycle_bin_item(item_path):
+            has_items, _, _ = query_recycle_bin_state()
+            rb_key = f"__recycle_bin__:{'full' if has_items else 'empty'}:{size}"
+            if rb_key in self._mem_cache:
+                return self._mem_cache[rb_key]
+            res_id = -54 if has_items else -55
+            pm = _extract_hicon_to_pixmap(r"C:\Windows\System32\imageres.dll", res_id, 128)
+            if not pm.isNull():
+                scaled = pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._mem_cache[rb_key] = scaled
                 return scaled
 
         try:

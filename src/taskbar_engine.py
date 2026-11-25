@@ -16,6 +16,7 @@ from win32_utils import (
     ACCENT_POLICY,
     WCA_ACCENT_POLICY,
     WINDOWCOMPOSITIONATTRIBDATA,
+    has_maximized_app_window,
     user32,
 )
 
@@ -62,6 +63,11 @@ def apply_win32_taskbar_backdrop(mode_key: str):
         accent.AccentState = ACCENT_DISABLED
         accent.AccentFlags = 0
         accent.GradientColor = 0x00000000
+    elif mode_key == "max_frosted":
+        # Rich dark acrylic backdrop when a window is maximized so white web/doc windows never wash out taskbar icons!
+        accent.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
+        accent.AccentFlags = 2
+        accent.GradientColor = 0xB81E130B
     else:
         # ACCENT_ENABLE_TRANSPARENTGRADIENT (2) with flags=2 & color=0x00000000 makes Win32 tray 100% clear!
         accent.AccentState = ACCENT_ENABLE_TRANSPARENTGRADIENT
@@ -91,6 +97,7 @@ def import_existing_ttb_config() -> dict:
         "enabled": True,
         "mode": "clear",
         "show_line": False,
+        "max_win_acrylic": True,
     }
 
 
@@ -110,25 +117,57 @@ class TaskbarTransparencyEngine(QObject):
     """
     configChanged = Signal()
 
-    def __init__(self, tb_cfg: dict, parent=None):
+    def __init__(self, tb_cfg: dict, parent=None, own_hwnds_provider=None):
         super().__init__(parent)
         self.cfg = tb_cfg
         if self.cfg.get("mode") not in TASKBAR_MODES:
             self.cfg["mode"] = "clear"
+        self.cfg.setdefault("max_win_acrylic", True)
+        self._own_hwnds_provider = own_hwnds_provider or (lambda: set())
 
         self._version = 1
         self._shm: mmap.mmap | None = None
         self._injected_pid = 0
+        self._maximized_active = False
 
         self._ensure_persistent_tap_dll()
         self._init_shared_memory()
+        self._maximized_active = self._detect_maximized_state()
         self.apply_all()
 
-        # Maintain Win32 transparent gradient backdrop + re-attach TAP DLL if Explorer restarts
+        # Maintain Win32 backdrop + re-attach TAP DLL if Explorer restarts
         self._guard_timer = QTimer(self)
         self._guard_timer.setInterval(1500)
         self._guard_timer.timeout.connect(self._check_explorer_alive)
         self._guard_timer.start()
+
+        # Fast 260ms watcher for window maximize / restore transitions (~0.08ms per poll)
+        self._max_timer = QTimer(self)
+        self._max_timer.setInterval(260)
+        self._max_timer.timeout.connect(self._poll_maximized_window)
+        self._max_timer.start()
+
+    def _detect_maximized_state(self) -> bool:
+        if not self.cfg.get("enabled", True) or not self.cfg.get("max_win_acrylic", False):
+            return False
+        if self.cfg.get("mode") == "normal":
+            return False
+        return has_maximized_app_window(self._own_hwnds_provider())
+
+    def _effective_mode_key(self) -> str:
+        if not self.cfg.get("enabled", True):
+            return "normal"
+        base = self.cfg.get("mode", "clear")
+        if base != "normal" and self.cfg.get("max_win_acrylic", False) and self._maximized_active:
+            return "max_frosted"
+        return base
+
+    def _poll_maximized_window(self):
+        now_max = self._detect_maximized_state()
+        if now_max != self._maximized_active:
+            self._maximized_active = now_max
+            apply_win32_taskbar_backdrop(self._effective_mode_key())
+            self._write_shared_state()
 
     def _ensure_persistent_tap_dll(self):
         bundled = ASSETS_DIR / "AuroraTaskbarTAP.dll"
@@ -168,6 +207,8 @@ class TaskbarTransparencyEngine(QObject):
         _, mode_int = TASKBAR_MODES.get(mode_key, TASKBAR_MODES["clear"])
         if not enabled:
             mode_int = 3  # System default
+        elif mode_key != "normal" and self.cfg.get("max_win_acrylic", False) and self._maximized_active:
+            mode_int = 2  # Deep Aurora Glass (0.68) for crisp contrast against maximized windows
         show_line = 1 if self.cfg.get("show_line", False) else 0
 
         self._shm.seek(0)
@@ -210,15 +251,15 @@ class TaskbarTransparencyEngine(QObject):
     def _check_explorer_alive(self):
         if not self.cfg.get("enabled", True):
             return
-        apply_win32_taskbar_backdrop(self.cfg.get("mode", "clear"))
+        apply_win32_taskbar_backdrop(self._effective_mode_key())
         pid = _get_explorer_taskbar_pid()
         if pid > 0 and pid != self._injected_pid:
             self._write_shared_state()
             self._inject_tap_into_explorer()
 
     def apply_all(self):
-        mode_key = self.cfg.get("mode", "clear") if self.cfg.get("enabled", True) else "normal"
-        apply_win32_taskbar_backdrop(mode_key)
+        self._maximized_active = self._detect_maximized_state()
+        apply_win32_taskbar_backdrop(self._effective_mode_key())
         self._write_shared_state()
         if self.cfg.get("enabled", True):
             self._inject_tap_into_explorer()
@@ -241,6 +282,11 @@ class TaskbarTransparencyEngine(QObject):
             a.triggered.connect(lambda checked=False, k=m_key: self._set_mode(k))
 
         tb_menu.addSeparator()
+        act_max = tb_menu.addAction("窗口最大化时自动切换深色毛玻璃")
+        act_max.setCheckable(True)
+        act_max.setChecked(bool(self.cfg.get("max_win_acrylic", False)))
+        act_max.toggled.connect(self._set_max_win_acrylic)
+
         act_line = tb_menu.addAction("保留任务栏顶部 1px 分割细线")
         act_line.setCheckable(True)
         act_line.setChecked(bool(self.cfg.get("show_line", False)))
@@ -250,6 +296,11 @@ class TaskbarTransparencyEngine(QObject):
 
     def _set_mode(self, mode_key: str):
         self.cfg["mode"] = mode_key
+        self.apply_all()
+        self.configChanged.emit()
+
+    def _set_max_win_acrylic(self, val: bool):
+        self.cfg["max_win_acrylic"] = bool(val)
         self.apply_all()
         self.configChanged.emit()
 
