@@ -24,6 +24,14 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 
 没有臃肿的框架，没有后台驻留的累赘——一个 exe，全部搞定。
 
+## 📸 效果图
+
+![Aurora Desktop 全景：胶囊收纳 + 艺术时钟 + 全透明任务栏](docs/images/hero-desktop.jpg)
+
+![极光胶囊卡片：AI 悬浮栏 + 自动分组收纳](docs/images/capsule-cards.png)
+
+![全透明任务栏：壁纸贯穿到底](docs/images/taskbar-transparent.png)
+
 ## 🚀 四大核心能力
 
 ### 🔍 极光全局搜索（Aurora Spotlight）
