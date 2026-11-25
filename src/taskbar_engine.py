@@ -20,6 +20,9 @@ from win32_utils import (
 )
 
 ACCENT_DISABLED = 0
+ACCENT_ENABLE_TRANSPARENTGRADIENT = 2
+ACCENT_ENABLE_BLURBEHIND = 3
+ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 
 
 class GUID(ctypes.Structure):
@@ -52,12 +55,18 @@ SHARED_MEM_NAME = "Local\\AuroraTaskbarSharedState_v1"
 PERSISTENT_TAP_DLL = DATA_ROOT / "AuroraTaskbarTAP.dll"
 
 
-def clear_legacy_win32_taskbar_black_state():
-    """Ensure Shell_TrayWnd has clean Win32 composition state on Windows 11 24H2."""
+def apply_win32_taskbar_backdrop(mode_key: str):
+    """Set underlying Win32 Shell_TrayWnd & Shell_SecondaryTrayWnd backdrop so XAML transparency reveals wallpaper instead of black!"""
     accent = ACCENT_POLICY()
-    accent.AccentState = ACCENT_DISABLED
-    accent.AccentFlags = 0
-    accent.GradientColor = 0
+    if mode_key == "normal":
+        accent.AccentState = ACCENT_DISABLED
+        accent.AccentFlags = 0
+        accent.GradientColor = 0x00000000
+    else:
+        # ACCENT_ENABLE_TRANSPARENTGRADIENT (2) with flags=2 & color=0x00000000 makes Win32 tray 100% clear!
+        accent.AccentState = ACCENT_ENABLE_TRANSPARENTGRADIENT
+        accent.AccentFlags = 2
+        accent.GradientColor = 0x00000000
     accent.AnimationId = 0
 
     data = WINDOWCOMPOSITIONATTRIBDATA()
@@ -113,12 +122,11 @@ class TaskbarTransparencyEngine(QObject):
 
         self._ensure_persistent_tap_dll()
         self._init_shared_memory()
-        clear_legacy_win32_taskbar_black_state()
         self.apply_all()
 
-        # Monitor Explorer restarts (e.g. if explorer.exe restarts, re-attach TAP DLL automatically)
+        # Maintain Win32 transparent gradient backdrop + re-attach TAP DLL if Explorer restarts
         self._guard_timer = QTimer(self)
-        self._guard_timer.setInterval(5000)
+        self._guard_timer.setInterval(1500)
         self._guard_timer.timeout.connect(self._check_explorer_alive)
         self._guard_timer.start()
 
@@ -196,12 +204,15 @@ class TaskbarTransparencyEngine(QObject):
     def _check_explorer_alive(self):
         if not self.cfg.get("enabled", True):
             return
+        apply_win32_taskbar_backdrop(self.cfg.get("mode", "clear"))
         pid = _get_explorer_taskbar_pid()
         if pid > 0 and pid != self._injected_pid:
             self._write_shared_state()
             self._inject_tap_into_explorer()
 
     def apply_all(self):
+        mode_key = self.cfg.get("mode", "clear") if self.cfg.get("enabled", True) else "normal"
+        apply_win32_taskbar_backdrop(mode_key)
         self._write_shared_state()
         if self.cfg.get("enabled", True):
             self._inject_tap_into_explorer()
