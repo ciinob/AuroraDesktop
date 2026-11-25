@@ -33,7 +33,7 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --onefile --windowed --name AuroraDesktop `
             --distpath dist --workpath build/pyi --specpath build/pyi `
-            --icon assets/aurora.ico --add-data "assets;assets" `
+            --icon "$PWD/assets/aurora.ico" --add-data "$PWD/assets;assets" `
             --paths src --paths . `
             --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes `
             --exclude-module PySide6.QtWebEngineCore `
