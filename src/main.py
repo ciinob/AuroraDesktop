@@ -15,11 +15,13 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QMessageBox, QS
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from clock_widget import AuroraClockWidget
 from icon_extractor import ShortcutIconLoader
 from memo_card import AuroraMemoCard
 from organize_shortcuts import scan_and_organize
 from paths import CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
 from spotlight import AuroraSpotlightOverlay
+from taskbar_engine import TaskbarTransparencyEngine, import_existing_ttb_config
 from widgets import (
     AICapsuleBar,
     AURORA_THEMES,
@@ -53,7 +55,9 @@ from win32_utils import (
 HOTKEY_ID_TOGGLE = 0xA001
 HOTKEY_ID_SPOTLIGHT = 0xA002
 AUTORUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_APPROVED_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTORUN_KEY_NAME = "AuroraDesktop"
+WM_TASKBAR_CREATED = user32.RegisterWindowMessageW("TaskbarCreated")
 
 DEFAULT_PARTITIONS = [
     {"key": "AI_CAPSULE", "title": "AI 悬浮胶囊栏", "folder": "01_AI_CAPSULE", "kind": "bar", "badge": "AI"},
@@ -64,13 +68,14 @@ DEFAULT_PARTITIONS = [
 
 
 class HotkeyReceiver(QWidget):
-    """Hidden Win32 message receiver for global hotkeys (Alt+~, Alt+S) and re-launch activation."""
+    """Hidden Win32 message receiver for global hotkeys (Alt+~, Alt+S), re-launch, and Explorer restarts."""
 
-    def __init__(self, on_toggle_vis, on_spotlight, on_force_show):
+    def __init__(self, on_toggle_vis, on_spotlight, on_force_show, on_explorer_restarted):
         super().__init__()
         self._on_toggle_vis = on_toggle_vis
         self._on_spotlight = on_spotlight
         self._on_force_show = on_force_show
+        self._on_explorer_restarted = on_explorer_restarted
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.resize(1, 1)
         hwnd = int(self.winId())
@@ -89,6 +94,9 @@ class HotkeyReceiver(QWidget):
                     return True, 0
             elif WM_AURORA_SHOW and msg.message == WM_AURORA_SHOW:
                 self._on_force_show()
+                return True, 0
+            elif WM_TASKBAR_CREATED and msg.message == WM_TASKBAR_CREATED:
+                self._on_explorer_restarted()
                 return True, 0
         return super().nativeEvent(eventType, message)
 
@@ -134,12 +142,45 @@ class AuroraController(QObject):
         self._rebuild_groups_meta()
 
         if FONTS_DIR.exists():
-            for font_name in ("Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf"):
+            for font_name in (
+                "Inter-Regular.ttf",
+                "Inter-Medium.ttf",
+                "Inter-SemiBold.ttf",
+                "Ruthligos.ttf",
+                "GeosansLight.ttf",
+            ):
                 fp = FONTS_DIR / font_name
                 if fp.exists():
                     QFontDatabase.addApplicationFont(str(fp))
         self.header_font_family = "Inter"
         self.icon_loader = ShortcutIconLoader()
+
+        # 1. Native Desktop Clock (Fused & Synced from Rainmeter Welfare\Clock!)
+        default_clock_cfg = {
+            "enabled": True,
+            "style": "aurora_signature",
+            "use_24h": True,
+            "show_seconds": False,
+            "scale": 1.0,
+            "locked": False,
+            "click_through": False,
+            "x": 2076,
+            "y": 2,
+        }
+        self.clock_cfg: dict = {**default_clock_cfg, **self.config.get("clock", {})}
+        self.clock_widget = AuroraClockWidget(
+            clock_cfg=self.clock_cfg,
+            theme_provider=self.get_current_theme_colors,
+        )
+        self.clock_widget.configChanged.connect(self._save_config)
+
+        # 2. Native Dual-Core Taskbar Transparency Engine (Fused & Synced from TranslucentTB!)
+        if "taskbar" in self.config and isinstance(self.config["taskbar"], dict):
+            self.taskbar_cfg = self.config["taskbar"]
+        else:
+            self.taskbar_cfg = import_existing_ttb_config()
+        self.taskbar_engine = TaskbarTransparencyEngine(self.taskbar_cfg, self)
+        self.taskbar_engine.configChanged.connect(self._save_config)
 
         self.windows: list[AuroraBaseWindow] = []
         self.memo_card: AuroraMemoCard | None = None
@@ -176,18 +217,20 @@ class AuroraController(QObject):
         self.ctrl_watcher.doubleCtrlPressed.connect(self.spotlight.toggle_spotlight)
         self.ctrl_watcher.start()
 
-        # Global hotkeys (Alt + ~ for stealth, Alt + S for Spotlight)
+        # Global hotkeys (Alt + ~ for stealth, Alt + S for Spotlight) + Explorer restart recovery
         self.hotkey_receiver = HotkeyReceiver(
             self.toggle_all_visibility,
             self.spotlight.toggle_spotlight,
             self.force_show_and_showcase,
+            self._on_explorer_restarted,
         )
 
-        # Periodic light z-order guard
+        # Periodic light z-order guard + cold-boot shell readiness re-pin
         self.z_guard_timer = QTimer(self)
         self.z_guard_timer.setInterval(4000)
         self.z_guard_timer.timeout.connect(self._enforce_all_bottom)
         self.z_guard_timer.start()
+        QTimer.singleShot(2000, self._on_explorer_restarted)
 
         self._setup_tray()
 
@@ -195,7 +238,11 @@ class AuroraController(QObject):
             w.show()
         if self.memo_card and self.show_memo:
             self.memo_card.show()
+        if self.clock_cfg.get("enabled", True):
+            self.clock_widget.show()
 
+        # Persist synced Rainmeter & TranslucentTB settings on startup
+        self._save_config()
         QTimer.singleShot(3500, self._initial_auto_collapse)
 
     @property
@@ -368,6 +415,8 @@ class AuroraController(QObject):
             "glass_opacity": self.opacity_key,
             "show_memo": self.show_memo,
             "memo_pinned": self.memo_pinned,
+            "clock": self.clock_cfg,
+            "taskbar": self.taskbar_cfg,
             "item_orders": self.item_orders,
             "lock_positions": self.lock_positions,
             "dragged_keys": sorted(self.dragged_keys),
@@ -603,11 +652,26 @@ class AuroraController(QObject):
 
     def get_all_hwnds(self) -> set[int]:
         hwnds = {int(w.winId()) for w in self._all_stackable_windows()}
+        if self.clock_widget.isVisible():
+            hwnds.add(int(self.clock_widget.winId()))
         if self.spotlight.isVisible():
             hwnds.add(int(self.spotlight.winId()))
         return hwnds
 
+    def _on_explorer_restarted(self):
+        """Re-pin all desktop widgets, re-show tray, and re-apply taskbar transparency after cold boot or Explorer restart."""
+        for w in self._all_stackable_windows():
+            if w.isVisible():
+                w.ensure_native_desktop_style()
+        if self.clock_widget.isVisible():
+            self.clock_widget.ensure_desktop_pinned()
+        self.taskbar_engine.apply_all()
+        if hasattr(self, "tray") and not self.tray.isVisible():
+            self.tray.show()
+
     def _enforce_all_bottom(self):
+        if self.clock_widget.isVisible():
+            send_to_bottom(int(self.clock_widget.winId()))
         if not self.visible_state:
             return
         for w in self._all_stackable_windows():
@@ -673,12 +737,30 @@ class AuroraController(QObject):
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTORUN_REG_PATH, 0, winreg.KEY_READ) as key:
                 val, _ = winreg.QueryValueEx(key, AUTORUN_KEY_NAME)
-                return bool(val)
+                if not val:
+                    return False
         except OSError:
             return False
 
+        # Also check Windows 11 Task Manager StartupApproved flag (odd first byte = disabled!)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_REG_PATH, 0, winreg.KEY_READ) as skey:
+                bval, _ = winreg.QueryValueEx(skey, AUTORUN_KEY_NAME)
+                if isinstance(bval, bytes) and len(bval) > 0 and (bval[0] & 1) == 1:
+                    return False
+        except OSError:
+            pass
+        return True
+
     def _toggle_autorun(self, checked: bool):
-        exe_cmd = f'"{sys.executable}"' if getattr(sys, "frozen", False) else f'"{sys.executable}" "{Path(__file__).resolve()}"'
+        target_exe = DATA_ROOT / "AuroraDesktop.exe"
+        if target_exe.exists():
+            exe_cmd = f'"{target_exe}"'
+        elif getattr(sys, "frozen", False):
+            exe_cmd = f'"{sys.executable}"'
+        else:
+            exe_cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
+
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTORUN_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
                 if checked:
@@ -688,6 +770,10 @@ class AuroraController(QObject):
                         winreg.DeleteValue(key, AUTORUN_KEY_NAME)
                     except OSError:
                         pass
+            if checked:
+                # Explicitly mark Approved (0x02) in Windows 11 Startup Manager so Task Manager never blocks it!
+                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_REG_PATH, 0, winreg.KEY_SET_VALUE) as skey:
+                    winreg.SetValueEx(skey, AUTORUN_KEY_NAME, 0, winreg.REG_BINARY, b"\x02" + b"\x00" * 11)
         except OSError:
             pass
 
@@ -711,6 +797,14 @@ class AuroraController(QObject):
         self.act_memo_tray.setCheckable(True)
         self.act_memo_tray.setChecked(self.show_memo)
         self.act_memo_tray.triggered.connect(self.toggle_memo_card)
+
+        menu.addSeparator()
+        # Fused Desktop Clock submenu (Rainmeter replacement)
+        clk_menu = menu.addMenu("🕒 右上角极简桌面时钟 (Rainmeter 融合)")
+        self.clock_widget.build_clock_menu(clk_menu)
+
+        # Fused Taskbar Transparency submenu (TranslucentTB replacement)
+        self.taskbar_engine.build_taskbar_menu(menu)
 
         menu.addSeparator()
         # Theme submenu
@@ -790,6 +884,7 @@ class AuroraController(QObject):
         self.ctrl_watcher.stop()
         self.hotkey_receiver.cleanup()
         self.spotlight.close()
+        self.clock_widget.close()
         self.tray.hide()
         self.app.quit()
 
