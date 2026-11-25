@@ -30,7 +30,7 @@ No bloated framework, no heavyweight background service — one exe does it all.
 
 ![Frosted capsule cards: AI bar & auto-grouped organizer](docs/images/capsule-cards.png)
 
-![Truly transparent taskbar: wallpaper runs to the bottom edge](docs/images/taskbar-transparent.png)
+![Full view: AI / Dev / Play / Tools capsules on the wallpaper](docs/images/capsule-full.jpg)
 
 ## 🚀 Four Core Powers
 

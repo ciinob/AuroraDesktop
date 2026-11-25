@@ -30,7 +30,7 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 
 ![极光胶囊卡片：AI 悬浮栏 + 自动分组收纳](docs/images/capsule-cards.png)
 
-![全透明任务栏：壁纸贯穿到底](docs/images/taskbar-transparent.png)
+![竖版全景：AI 栏 / 研发 / 娱乐 / 网络工具四组胶囊](docs/images/capsule-full.jpg)
 
 ## 🚀 四大核心能力
 
