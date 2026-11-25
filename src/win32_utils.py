@@ -45,8 +45,14 @@ WCA_ACCENT_POLICY = 19
 ACCENT_ENABLE_BLURBEHIND = 3
 ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 
+WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 WM_LBUTTONDOWN = 0x0201
+VK_CONTROL = 0x11
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
 SM_CXDOUBLECLK = 36
 SM_CYDOUBLECLK = 37
 GA_ROOT = 2
@@ -54,6 +60,7 @@ GA_ROOT = 2
 MOD_ALT = 0x0001
 MOD_NOREPEAT = 0x4000
 VK_OEM_3 = 0xC0  # '~' / '`' key
+VK_S = 0x53      # 'S' key
 
 
 class ACCENT_POLICY(ctypes.Structure):
@@ -82,6 +89,16 @@ class WINDOWPOS(ctypes.Structure):
         ("cx", ctypes.c_int),
         ("cy", ctypes.c_int),
         ("flags", wintypes.UINT),
+    ]
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
     ]
 
 
@@ -382,3 +399,52 @@ class DesktopDoubleClickWatcher(QObject):
         own_hwnds = self._own_hwnds_provider()
         if is_click_on_blank_desktop(x, y, own_hwnds):
             self.desktopDoubleClicked.emit()
+
+
+class DoubleCtrlWatcher(QObject):
+    """Lightweight WH_KEYBOARD_LL listener that detects quick Double-Tap Ctrl (like Raycast / Listary)."""
+    doubleCtrlPressed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hook = None
+        self._ctrl_down = False
+        self._other_key_pressed = False
+        self._last_ctrl_up_time = 0.0
+        self._hook_proc = HOOKPROC(self._kbd_callback)
+
+    def start(self):
+        if self._hook:
+            return
+        hmod = kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc, hmod, 0)
+
+    def stop(self):
+        if self._hook:
+            user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+    def _kbd_callback(self, nCode: int, wParam: int, lParam: int) -> int:
+        if nCode >= 0:
+            info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = info.vkCode
+            is_ctrl = vk in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL)
+
+            if wParam == WM_KEYDOWN:
+                if is_ctrl:
+                    self._ctrl_down = True
+                else:
+                    self._other_key_pressed = True
+            elif wParam == WM_KEYUP:
+                if is_ctrl:
+                    now = time.monotonic()
+                    if self._ctrl_down and not self._other_key_pressed:
+                        if 0.04 <= (now - self._last_ctrl_up_time) <= 0.36:
+                            self._last_ctrl_up_time = 0.0
+                            QTimer.singleShot(0, self.doubleCtrlPressed.emit)
+                        else:
+                            self._last_ctrl_up_time = now
+                    self._ctrl_down = False
+                    self._other_key_pressed = False
+
+        return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import win32com.client
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -14,11 +15,11 @@ from PySide6.QtCore import (
     QMimeData,
     QPoint,
     QPointF,
-    QPropertyAnimation,
     QRectF,
     QSize,
     Qt,
     QTimer,
+    QUrl,
     QVariantAnimation,
     Signal,
 )
@@ -26,6 +27,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
+    QDrag,
     QFont,
     QFontMetrics,
     QLinearGradient,
@@ -33,13 +35,13 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -47,11 +49,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
-import win32com.client
 
 from icon_extractor import ShortcutIconLoader, format_display_name
 from paths import DATA_ROOT
@@ -60,13 +60,9 @@ from win32_utils import (
     HWND_BOTTOM,
     MA_NOACTIVATE,
     SC_MINIMIZE,
-    SWP_NOZORDER,
-    WINDOWPOS,
     WM_MOUSEACTIVATE,
     WM_SYSCOMMAND,
-    WM_WINDOWPOSCHANGING,
     apply_acrylic_and_rounded_corners,
-    find_desktop_shell_host,
     pin_window_to_desktop_bottom,
     send_to_bottom,
     user32,
@@ -79,7 +75,22 @@ shell32.ShellExecuteW.argtypes = [
 ]
 shell32.ShellExecuteW.restype = wintypes.HINSTANCE
 
-# Priority ordering inside each group so user's core apps always appear first
+AURORA_MIME_TYPE = "application/x-aurora-shortcut-item"
+
+# Aurora color palettes: (Primary, Mid, Secondary, Display Label)
+AURORA_THEMES: dict[str, tuple[QColor, QColor, QColor, str]] = {
+    "aurora": (QColor("#2dd4bf"), QColor("#38bdf8"), QColor("#a855f7"), "🌌 北极光翠紫 (默认)"),
+    "glacier": (QColor("#38bdf8"), QColor("#60a5fa"), QColor("#818cf8"), "🧊 冰川极昼蓝"),
+    "nebula": (QColor("#f472b6"), QColor("#c084fc"), QColor("#818cf8"), "🌸 星云流光粉"),
+    "vision": (QColor("#f8fafc"), QColor("#cbd5e1"), QColor("#94a3b8"), "❄️ VisionOS 纯白霜玻璃"),
+}
+
+GLASS_OPACITY_LEVELS: dict[str, tuple[int, str]] = {
+    "airy": (102, "极致高透 (Airy)"),
+    "standard": (135, "标准极光 (Default)"),
+    "deep": (176, "深邃暗夜 (Deep)"),
+}
+
 PRIORITY_ORDER = {
     "AI_CAPSULE": ["gemini", "claude", "chatgpt", "deepseek", "grok"],
     "RESEARCH_DEV": [
@@ -100,8 +111,8 @@ PRIORITY_ORDER = {
 
 MENU_QSS = """
 QMenu {
-    background-color: rgba(16, 22, 38, 244);
-    color: rgba(248, 250, 255, 242);
+    background-color: rgba(14, 20, 36, 245);
+    color: rgba(248, 250, 255, 244);
     border: 1px solid rgba(255, 255, 255, 38);
     border-radius: 11px;
     padding: 6px 5px;
@@ -115,7 +126,7 @@ QMenu::item {
     margin: 1px 4px;
 }
 QMenu::item:selected {
-    background-color: rgba(45, 212, 191, 56);
+    background-color: rgba(45, 212, 191, 58);
     color: #ffffff;
 }
 QMenu::separator {
@@ -124,7 +135,6 @@ QMenu::separator {
     margin: 5px 10px;
 }
 """
-
 
 DIALOG_QSS = """
 QDialog, QMessageBox, QInputDialog {
@@ -242,10 +252,43 @@ def make_apple_font(pixel_size: int, weight: QFont.Weight = QFont.Medium, letter
     return font
 
 
-def sort_group_items(group_key: str, files: list[Path]) -> list[Path]:
+def extract_vibrant_accent(pm: QPixmap) -> QColor:
+    """Sample dominant vibrant color from an app icon for subtle color-adaptive hover aura."""
+    if pm.isNull():
+        return QColor("#2dd4bf")
+    img = pm.scaled(16, 16, Qt.IgnoreAspectRatio, Qt.FastTransformation).toImage()
+    r_sum = g_sum = b_sum = w_sum = 0.0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() < 80:
+                continue
+            sat = c.hsvSaturationF()
+            val = c.valueF()
+            weight = 0.25 + sat * 1.8 + (0.3 if 0.25 < val < 0.95 else 0.0)
+            r_sum += c.red() * weight
+            g_sum += c.green() * weight
+            b_sum += c.blue() * weight
+            w_sum += weight
+    if w_sum <= 0.01:
+        return QColor("#2dd4bf")
+    col = QColor(int(r_sum / w_sum), int(g_sum / w_sum), int(b_sum / w_sum))
+    # Ensure pleasant brightness & saturation on dark glass
+    h, s, l, _ = col.getHsl()
+    if h < 0:
+        return QColor("#38bdf8")
+    col.setHsl(h, max(140, min(235, s)), max(135, min(185, l)))
+    return col
+
+
+def sort_group_items(group_key: str, files: list[Path], custom_order: list[str] | None = None) -> list[Path]:
+    order_map = {name.lower(): i for i, name in enumerate(custom_order or [])}
     priorities = PRIORITY_ORDER.get(group_key, [])
 
     def rank(p: Path):
+        low_name = p.name.lower()
+        if low_name in order_map:
+            return (-1, order_map[low_name], low_name)
         stem = p.stem.lower()
         for idx, kw in enumerate(priorities):
             if kw in stem:
@@ -256,7 +299,6 @@ def sort_group_items(group_key: str, files: list[Path]) -> list[Path]:
 
 
 def _clean_pyinstaller_env() -> dict[str, str]:
-    """Build clean environment without PyInstaller _MEIPASS overrides so launched apps never load wrong DLLs."""
     env = os.environ.copy()
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
@@ -274,13 +316,11 @@ def _clean_pyinstaller_env() -> dict[str, str]:
 
 
 def launch_item(path: Path, run_as_admin: bool = False):
-    """Launch shortcut or executable cleanly in foreground without PyInstaller DLL pollution."""
     if not path.exists():
         return
 
     user32.AllowSetForegroundWindow(ASFW_ANY)
 
-    # Temporarily sanitize current process env around ShellExecuteW / startfile
     saved_env = {}
     meipass = getattr(sys, "_MEIPASS", None)
     keys_to_strip = ("QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "_MEIPASS2", "PYTHONPATH", "PYTHONHOME")
@@ -300,7 +340,6 @@ def launch_item(path: Path, run_as_admin: bool = False):
         if run_as_admin:
             shell32.ShellExecuteW(None, "runas", str(path), None, str(path.parent), 1)
         else:
-            # Passing None (NULL verb) invokes the true default shell verb on all .lnk / MSI / AppX shortcuts!
             res = shell32.ShellExecuteW(None, None, str(path), None, None, 1)
             if int(res) <= 32:
                 os.startfile(str(path))
@@ -327,31 +366,27 @@ HIDDEN_SKIP_FILES = {"desktop.ini", "thumbs.db", ".ds_store"}
 
 
 def list_valid_partition_items(folder_path: Path) -> list[Path]:
-    """List all user items in a partition folder: shortcuts, apps, PDFs, images, docs, and folders!"""
     if not folder_path.exists():
         return []
-    items = []
-    for p in folder_path.iterdir():
-        if p.name.lower() in HIDDEN_SKIP_FILES or p.name.startswith("."):
-            continue
-        items.append(p)
-    return items
+    return [
+        p for p in folder_path.iterdir()
+        if p.name.lower() not in HIDDEN_SKIP_FILES and not p.name.startswith(".")
+    ]
 
 
-def import_item_into_group_folder(src_path: Path, dest_folder: Path):
-    """Add any .lnk/.url (copy) or any PDF/image/doc/folder/exe (create lightweight .lnk shortcut) into dest_folder."""
+def import_item_into_group_folder(src_path: Path, dest_folder: Path) -> Path | None:
     if not src_path.exists():
-        return
+        return None
     dest_folder.mkdir(parents=True, exist_ok=True)
-    # Ignore if dragged from inside the exact same folder
     if src_path.parent.resolve() == dest_folder.resolve():
-        return
+        return src_path
 
     ext = src_path.suffix.lower()
     if ext in (".lnk", ".url"):
-        shutil.copy2(str(src_path), str(dest_folder / src_path.name))
+        dst = dest_folder / src_path.name
+        shutil.copy2(str(src_path), str(dst))
+        return dst
     else:
-        # Keep non-exe extension in shortcut name (e.g. meng2016.pdf.lnk -> displays as meng2016.pdf!)
         base_label = src_path.stem if ext in (".exe", ".bat", ".cmd") else src_path.name
         lnk_path = dest_folder / f"{base_label}.lnk"
         shell = win32com.client.Dispatch("WScript.Shell")
@@ -359,10 +394,10 @@ def import_item_into_group_folder(src_path: Path, dest_folder: Path):
         sc.TargetPath = str(src_path)
         sc.WorkingDirectory = str(src_path.parent if src_path.is_file() else src_path)
         sc.Save()
+        return lnk_path
 
 
 def safe_remove_shortcut(item_path: Path):
-    """Safely remove item from card by moving it into D:\\AuroraDesktop\\Removed_Backup (never deletes user files)."""
     if not item_path.exists():
         return
     backup_dir = DATA_ROOT / "Removed_Backup"
@@ -377,7 +412,6 @@ def safe_remove_shortcut(item_path: Path):
 
 
 def prompt_add_items_to_folder(parent: QWidget, dest_folder: Path) -> bool:
-    """Open native file picker supporting ALL files: images, PDFs, Office docs, apps, and shortcuts."""
     files, _ = QFileDialog.getOpenFileNames(
         parent,
         "选择要添加的文件（支持图片、PDF、文档、程序、快捷方式）",
@@ -392,7 +426,6 @@ def prompt_add_items_to_folder(parent: QWidget, dest_folder: Path) -> bool:
 
 
 def prompt_add_directory_to_folder(parent: QWidget, dest_folder: Path) -> bool:
-    """Open native folder picker to add a folder shortcut (e.g. 文献) into a partition."""
     chosen_dir = QFileDialog.getExistingDirectory(
         parent,
         "选择要添加到此极光分区的文件夹",
@@ -405,10 +438,9 @@ def prompt_add_directory_to_folder(parent: QWidget, dest_folder: Path) -> bool:
 
 
 class AuroraIconTile(QWidget):
-    """Individual minimalist icon tile with hover aurora glow, crisp typography, and context menu."""
+    """Minimalist icon tile with adaptive icon-color hover aura, click ripple ring, and drag-to-reorder."""
     moveRequested = Signal(Path, str)
     hoverNameChanged = Signal(str)
-    refreshRequested = Signal()
 
     def __init__(
         self,
@@ -429,28 +461,45 @@ class AuroraIconTile(QWidget):
         self.short_name, self.full_name = format_display_name(item_path)
         self.icon_size = 34 if compact_capsule else 36
         self.pixmap: QPixmap = icon_loader.get_icon_pixmap(item_path, self.icon_size * 2)
+        self.accent_color: QColor = extract_vibrant_accent(self.pixmap)
 
         if compact_capsule:
-            self.setFixedSize(58, 52)
+            self.setFixedSize(54, 52)
         else:
-            self.setFixedSize(64, 68)
+            self.setFixedSize(66, 68)
 
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
+        self.setToolTip(self.full_name)
 
         self._hover_progress = 0.0
         self._press_scale = 1.0
+        self._press_origin = QPoint()
         self._last_launch_ts = 0.0
+        self._ripple_progress = 0.0
+        self._ripple_active = False
+
         self._anim = QVariantAnimation(self)
-        self._anim.setDuration(160)
+        self._anim.setDuration(170)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_val)
 
-        # Crisp tooltip for full name
-        self.setToolTip(self.full_name)
+        self._ripple_anim = QVariantAnimation(self)
+        self._ripple_anim.setDuration(340)
+        self._ripple_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._ripple_anim.valueChanged.connect(self._on_ripple_val)
+        self._ripple_anim.finished.connect(self._on_ripple_done)
 
     def _on_anim_val(self, val):
         self._hover_progress = float(val)
+        self.update()
+
+    def _on_ripple_val(self, val):
+        self._ripple_progress = float(val)
+        self.update()
+
+    def _on_ripple_done(self):
+        self._ripple_active = False
         self.update()
 
     def enterEvent(self, event):
@@ -471,20 +520,52 @@ class AuroraIconTile(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._press_scale = 0.92
+            self._press_scale = 0.90
+            self._press_origin = event.position().toPoint()
             self.update()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # Forward cursor position to parent AuroraBaseWindow for cursor-tracking border spotlight!
+        win = self.window()
+        if isinstance(win, AuroraBaseWindow):
+            win.update_cursor_spotlight(win.mapFromGlobal(event.globalPosition().toPoint()))
+
+        if (event.buttons() & Qt.LeftButton) and not self._press_origin.isNull():
+            if (event.position().toPoint() - self._press_origin).manhattanLength() > 8:
+                self._press_scale = 1.0
+                self._start_tile_drag()
+                return
+        super().mouseMoveEvent(event)
+
+    def _start_tile_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        payload = f"{self.current_group_key}|{self.item_path}".encode("utf-8")
+        mime.setData(AURORA_MIME_TYPE, payload)
+        mime.setUrls([QUrl.fromLocalFile(str(self.item_path))])
+        drag.setMimeData(mime)
+        if not self.pixmap.isNull():
+            drag_pm = self.pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            drag.setPixmap(drag_pm)
+            drag.setHotSpot(QPoint(20, 20))
+        drag.exec(Qt.MoveAction | Qt.CopyAction)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             was_pressed = self._press_scale < 1.0
             self._press_scale = 1.0
+            self._press_origin = QPoint()
             self.update()
             if was_pressed and self.rect().contains(event.position().toPoint()):
                 now = time.monotonic()
-                # Debounce 600ms so both single-click and habitual double-click launch cleanly once
                 if now - self._last_launch_ts > 0.6:
                     self._last_launch_ts = now
+                    self._ripple_active = True
+                    self._ripple_anim.stop()
+                    self._ripple_anim.setStartValue(0.0)
+                    self._ripple_anim.setEndValue(1.0)
+                    self._ripple_anim.start()
                     launch_item(self.item_path)
         super().mouseReleaseEvent(event)
 
@@ -526,13 +607,14 @@ class AuroraIconTile(QWidget):
         elif chosen in move_actions:
             self.moveRequested.emit(self.item_path, move_actions[chosen])
         elif chosen == act_rename:
-            new_name, ok = QInputDialog.getText(
-                None, "重命名快捷方式", "请输入新的显示名称：", text=self.short_name
-            )
-            new_name = new_name.strip()
-            if ok and new_name:
-                invalid_chars = '<>:"/\\|?*'
-                for ch in invalid_chars:
+            dlg = QInputDialog()
+            dlg.setStyleSheet(DIALOG_QSS)
+            dlg.setWindowTitle("重命名")
+            dlg.setLabelText("请输入新的显示名称：")
+            dlg.setTextValue(self.short_name)
+            if dlg.exec() == QInputDialog.Accepted:
+                new_name = dlg.textValue().strip()
+                for ch in '<>:"/\\|?*':
                     new_name = new_name.replace(ch, "")
                 if new_name:
                     new_path = self.item_path.with_name(f"{new_name}{self.item_path.suffix}")
@@ -552,19 +634,36 @@ class AuroraIconTile(QWidget):
         w, h = self.width(), self.height()
         p = self._hover_progress
 
-        # Subtle hover aurora glass highlight pill
+        win = self.window()
+        c_theme = win.get_theme_colors()[0] if isinstance(win, AuroraBaseWindow) else QColor("#2dd4bf")
+
+        # Color-adaptive hover glass aura (blends icon's vibrant color with Aurora theme!)
         if p > 0.01:
             bg_rect = QRectF(2.0, 2.0, w - 4.0, h - 4.0)
             grad = QLinearGradient(bg_rect.topLeft(), bg_rect.bottomRight())
-            grad.setColorAt(0.0, QColor(45, 212, 191, int(38 * p)))
-            grad.setColorAt(1.0, QColor(168, 85, 247, int(34 * p)))
+            ca = QColor(self.accent_color); ca.setAlpha(int(48 * p))
+            cb = QColor(c_theme); cb.setAlpha(int(36 * p))
+            grad.setColorAt(0.0, ca)
+            grad.setColorAt(1.0, cb)
             painter.setBrush(grad)
-            pen = QPen(QColor(45, 212, 191, int(90 * p)), 1.0)
-            painter.setPen(pen)
+            stroke = QColor(self.accent_color)
+            stroke.setAlpha(int(105 * p))
+            painter.setPen(QPen(stroke, 1.0))
             painter.drawRoundedRect(bg_rect, 10.0, 10.0)
 
-        # Draw crisp icon with gentle 2px hover lift
-        lift = -2.0 * p
+        # Click ripple wave animation
+        if self._ripple_active:
+            rp = self._ripple_progress
+            cx, cy = w / 2.0, (h - 14.0) / 2.0
+            rad = 10.0 + rp * 24.0
+            r_col = QColor(c_theme)
+            r_col.setAlpha(int(190 * (1.0 - rp)))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(r_col, 1.6))
+            painter.drawEllipse(QPointF(cx, cy), rad, rad)
+
+        # Crisp icon with 2.5px spring hover lift
+        lift = -2.5 * p
         isz = self.icon_size * self._press_scale
         ix = (w - isz) / 2.0
         iy = (4.0 if self.compact_capsule else 6.0) + lift + (self.icon_size - isz) / 2.0
@@ -572,7 +671,7 @@ class AuroraIconTile(QWidget):
         if not self.pixmap.isNull():
             painter.drawPixmap(QRectF(ix, iy, isz, isz), self.pixmap, QRectF(self.pixmap.rect()))
 
-        # Draw Apple macOS/iOS style crisp caption below icon (Medium weight + subtle 1px drop shadow)
+        # Apple macOS/iOS Medium weight label + 1px dark contrast shadow
         font = make_apple_font(10 if self.compact_capsule else 11, QFont.Medium, -0.1)
         painter.setFont(font)
 
@@ -583,51 +682,55 @@ class AuroraIconTile(QWidget):
         text_rect = QRectF(1.0, ty, w - 2.0, 16.0)
         shadow_rect = QRectF(1.0, ty + 1.0, w - 2.0, 16.0)
 
-        # Subtle dark shadow for high contrast over bright/aurora wallpapers
-        painter.setPen(QColor(0, 0, 0, 135))
+        painter.setPen(QColor(0, 0, 0, 138))
         painter.drawText(shadow_rect, Qt.AlignHCenter | Qt.AlignVCenter, elided)
 
-        text_alpha = int(222 + 33 * p) if self.compact_capsule else int(232 + 23 * p)
+        text_alpha = int(224 + 31 * p) if self.compact_capsule else int(234 + 21 * p)
         painter.setPen(QColor(255, 255, 255, text_alpha))
         painter.drawText(text_rect, Qt.AlignHCenter | Qt.AlignVCenter, elided)
 
 
 class AuroraBaseWindow(QWidget):
-    """Frameless desktop-pinned Windows 11 Acrylic card with 1px Northern Lights gradient border."""
+    """Frameless Windows 11 Acrylic card with cursor-tracking radial Aurora spotlight border."""
     positionChangedByUser = Signal()
 
     RADIUS = 14.0
-    GLASS_BG = QColor(10, 15, 28, 135)  # Exact user spec: rgba(10, 15, 28, 135)
-    EMERALD = QColor("#2dd4bf")         # Exact user spec: #2dd4bf
-    CYAN_MID = QColor("#38bdf8")
-    PURPLE = QColor("#a855f7")          # Exact user spec: #a855f7
 
-    def __init__(self, allow_drag_provider=None, parent=None):
+    def __init__(self, allow_drag_provider=None, theme_provider=None, opacity_provider=None, parent=None):
         super().__init__(parent)
         self._allow_drag_provider = allow_drag_provider or (lambda: True)
+        self._theme_provider = theme_provider or (lambda: AURORA_THEMES["aurora"][:3])
+        self._opacity_provider = opacity_provider or (lambda: 135)
         self._acrylic_initialized = False
         self._menu_open = False
         self._dragging = False
         self._drag_offset = QPoint()
+        self._cursor_pos = QPointF(-200.0, -200.0)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
 
-        # Hover border luminance animation (silent low brightness -> glowing aurora hover)
         self._border_glow = 0.0
         self._glow_anim = QVariantAnimation(self)
         self._glow_anim.setDuration(240)
         self._glow_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._glow_anim.valueChanged.connect(self._on_glow_changed)
 
-        # Window opacity animation for 1-click fade hide/show
         self._fade_anim = QVariantAnimation(self)
         self._fade_anim.setDuration(240)
         self._fade_anim.setEasingCurve(QEasingCurve.InOutCubic)
         self._fade_anim.valueChanged.connect(self._on_fade_val)
         self._fade_anim.finished.connect(self._on_fade_finished)
         self._hiding_after_fade = False
+
+    def get_theme_colors(self) -> tuple[QColor, QColor, QColor]:
+        return self._theme_provider()
+
+    def update_cursor_spotlight(self, local_pt: QPoint):
+        self._cursor_pos = QPointF(local_pt)
+        if self._border_glow > 0.01:
+            self.update()
 
     def _on_glow_changed(self, val):
         self._border_glow = float(val)
@@ -677,6 +780,7 @@ class AuroraBaseWindow(QWidget):
             send_to_bottom(int(self.winId()))
 
     def enterEvent(self, event):
+        self._cursor_pos = QPointF(self.mapFromGlobal(QCursor.pos()))
         self._glow_anim.stop()
         self._glow_anim.setStartValue(self._border_glow)
         self._glow_anim.setEndValue(1.0)
@@ -691,6 +795,12 @@ class AuroraBaseWindow(QWidget):
             self._glow_anim.start()
         super().leaveEvent(event)
 
+    def mouseMoveEvent(self, event):
+        self._cursor_pos = event.position()
+        if self._border_glow > 0.01:
+            self.update()
+        super().mouseMoveEvent(event)
+
     def set_menu_open(self, is_open: bool):
         self._menu_open = is_open
         if not is_open and not self.underMouse():
@@ -703,11 +813,9 @@ class AuroraBaseWindow(QWidget):
         if eventType == b"windows_generic_MSG" or eventType == "windows_generic_MSG":
             msg = ctypes.wintypes.MSG.from_address(int(message))
             if msg.message == WM_SYSCOMMAND:
-                # Never minimize on Win+D or Minimize-All
                 if (msg.wParam & 0xFFF0) == SC_MINIMIZE:
                     return True, 0
             elif msg.message == WM_MOUSEACTIVATE:
-                # Clicking an icon/card never activates or raises card above normal apps
                 return True, MA_NOACTIVATE
         return super().nativeEvent(eventType, message)
 
@@ -719,52 +827,73 @@ class AuroraBaseWindow(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, self.RADIUS, self.RADIUS)
 
-        # 1. Deep high-transparency glass fill: rgba(10, 15, 28, 135)
-        painter.fillPath(path, self.GLASS_BG)
+        c1, c_mid, c2 = self._theme_provider()
+        bg_alpha = self._opacity_provider()
+        g = self._border_glow
 
-        # 2. Subtle top-edge specular frost sheen for realistic glass depth
+        # 1. Deep high-transparency glass fill
+        painter.fillPath(path, QColor(10, 15, 28, bg_alpha))
+
+        # 2. Top-edge specular frost sheen
         sheen = QLinearGradient(0, 0, 0, min(44.0, self.height()))
-        sheen.setColorAt(0.0, QColor(255, 255, 255, int(10 + 10 * self._border_glow)))
+        sheen.setColorAt(0.0, QColor(255, 255, 255, int(10 + 10 * g)))
         sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.fillPath(path, sheen)
 
-        # 3. 1px Northern Lights gradient border (#2dd4bf -> #a855f7)
-        # Silent low brightness at rest (alpha ~64), glowing aurora on hover (alpha ~215)
-        g = self._border_glow
-        alpha_main = int(64 + 151 * g)
-        alpha_mid = int(42 + 125 * g)
+        # 3. VisionOS / Linear.app cursor-tracking ambient inner spotlight!
+        if g > 0.02 and self._cursor_pos.x() > -100:
+            inner_spot = QRadialGradient(self._cursor_pos, 145.0)
+            sc1 = QColor(c1); sc1.setAlpha(int(22 * g))
+            sc2 = QColor(c2); sc2.setAlpha(int(9 * g))
+            sc_end = QColor(c1); sc_end.setAlpha(0)
+            inner_spot.setColorAt(0.0, sc1)
+            inner_spot.setColorAt(0.45, sc2)
+            inner_spot.setColorAt(1.0, sc_end)
+            painter.fillPath(path, inner_spot)
 
-        c_emerald = QColor(self.EMERALD)
-        c_emerald.setAlpha(alpha_main)
-        c_mid = QColor(self.CYAN_MID)
-        c_mid.setAlpha(alpha_mid)
-        c_purple = QColor(self.PURPLE)
-        c_purple.setAlpha(alpha_main)
+        # 4. 1px Northern Lights base gradient border
+        alpha_main = int(64 + 130 * g)
+        alpha_mid = int(42 + 105 * g)
+        col_1 = QColor(c1); col_1.setAlpha(alpha_main)
+        col_m = QColor(c_mid); col_m.setAlpha(alpha_mid)
+        col_2 = QColor(c2); col_2.setAlpha(alpha_main)
 
-        # Subtle aurora angle shift on hover
         shift = 28.0 * g
         border_grad = QLinearGradient(
             QPointF(rect.left() + shift, rect.top()),
             QPointF(rect.right() - shift, rect.bottom()),
         )
-        border_grad.setColorAt(0.0, c_emerald)
-        border_grad.setColorAt(0.5, c_mid)
-        border_grad.setColorAt(1.0, c_purple)
+        border_grad.setColorAt(0.0, col_1)
+        border_grad.setColorAt(0.5, col_m)
+        border_grad.setColorAt(1.0, col_2)
 
-        pen = QPen(border_grad, 1.0)
-        painter.setPen(pen)
+        painter.setPen(QPen(border_grad, 1.0))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
+        # 5. Cursor-tracking bright specular highlight along the 1px border!
+        if g > 0.02 and self._cursor_pos.x() > -100:
+            edge_spot = QRadialGradient(self._cursor_pos, 115.0)
+            es_bright = QColor(255, 255, 255, int(185 * g))
+            es_mid = QColor(c1); es_mid.setAlpha(int(150 * g))
+            es_zero = QColor(c1); es_zero.setAlpha(0)
+            edge_spot.setColorAt(0.0, es_bright)
+            edge_spot.setColorAt(0.35, es_mid)
+            edge_spot.setColorAt(1.0, es_zero)
+            painter.setPen(QPen(edge_spot, 1.3))
+            painter.drawPath(path)
+
 
 class AICapsuleBar(AuroraBaseWindow):
-    """Compact horizontal single-row Aurora Capsule Bar (used for AI Capsule and custom horizontal bars)."""
+    """Compact horizontal single-row Aurora Capsule Bar + right-side Spotlight search trigger pill."""
     itemMoveRequested = Signal(Path, str)
+    orderChanged = Signal(str, list)
     contextActionTriggered = Signal(str)
     renameCapsuleRequested = Signal(str)
     deleteCapsuleRequested = Signal(str)
+    spotlightRequested = Signal()
 
-    CARD_WIDTH = 356
+    CARD_WIDTH = 368
     CARD_HEIGHT = 66
 
     def __init__(
@@ -774,26 +903,40 @@ class AICapsuleBar(AuroraBaseWindow):
         header_font_family: str,
         all_groups: dict[str, tuple[str, Path]],
         allow_drag_provider=None,
+        theme_provider=None,
+        opacity_provider=None,
+        custom_order_provider=None,
         group_key: str = "AI_CAPSULE",
         title: str = "AI 悬浮胶囊栏",
         badge_text: str = "AI",
+        show_search_pill: bool = True,
     ):
-        super().__init__(allow_drag_provider=allow_drag_provider)
+        super().__init__(
+            allow_drag_provider=allow_drag_provider,
+            theme_provider=theme_provider,
+            opacity_provider=opacity_provider,
+        )
         self.group_key = group_key
         self.title = title
         self.badge_text = badge_text
+        self.show_search_pill = show_search_pill
         self.folder_path = folder_path
         self.icon_loader = icon_loader
         self.header_font_family = header_font_family
         self.all_groups = all_groups
+        self._custom_order_provider = custom_order_provider or (lambda _: [])
+        self._hover_search = False
+        self._search_rect = QRectF(self.CARD_WIDTH - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
 
         self.setFixedSize(self.CARD_WIDTH, self.CARD_HEIGHT)
         self.setAcceptDrops(True)
 
         self._row_container = QWidget(self)
+        self._row_container.setMouseTracking(True)
         self._row_layout = QHBoxLayout(self._row_container)
-        self._row_layout.setContentsMargins(58, 7, 10, 7)
-        self._row_layout.setSpacing(3)
+        right_pad = 40 if show_search_pill else 10
+        self._row_layout.setContentsMargins(52, 7, right_pad, 7)
+        self._row_layout.setSpacing(1)
         self._row_container.setGeometry(0, 0, self.CARD_WIDTH, self.CARD_HEIGHT)
 
         self.reload_items()
@@ -805,12 +948,13 @@ class AICapsuleBar(AuroraBaseWindow):
                 item.widget().deleteLater()
 
         files = list_valid_partition_items(self.folder_path)
-        files = sort_group_items(self.group_key, files)
+        files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
 
-        # Dynamically adapt width if user ever adds >5 AI icons
-        needed_w = max(self.CARD_WIDTH, 62 + len(files) * 59)
+        extra_right = 42 if self.show_search_pill else 12
+        needed_w = max(self.CARD_WIDTH, 54 + len(files) * 55 + extra_right)
         self.setFixedSize(needed_w, self.CARD_HEIGHT)
         self._row_container.setGeometry(0, 0, needed_w, self.CARD_HEIGHT)
+        self._search_rect = QRectF(needed_w - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
 
         for f in files:
             tile = AuroraIconTile(
@@ -828,14 +972,29 @@ class AICapsuleBar(AuroraBaseWindow):
         self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and event.position().x() < 52 and self._allow_drag_provider():
-            self._dragging = True
-            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        if event.button() == Qt.LeftButton:
+            pos = event.position()
+            if self.show_search_pill and self._search_rect.contains(pos):
+                self.spotlightRequested.emit()
+                return
+            if pos.x() < 52 and self._allow_drag_provider():
+                self._dragging = True
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        pos = event.position()
+        was_hov = self._hover_search
+        self._hover_search = self.show_search_pill and self._search_rect.contains(pos)
+        if self._hover_search != was_hov:
+            self.setCursor(Qt.PointingHandCursor if self._hover_search else Qt.ArrowCursor)
+            self.update()
+
         if self._dragging and (event.buttons() & Qt.LeftButton):
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            if abs(new_pos.x() - 24) <= 12:
+                new_pos.setX(24)
+            self.move(new_pos)
             self.positionChangedByUser.emit()
         super().mouseMoveEvent(event)
 
@@ -847,7 +1006,10 @@ class AICapsuleBar(AuroraBaseWindow):
         self.set_menu_open(True)
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
+        act_search = menu.addAction("🔍 打开极光全局搜索 (双击 Ctrl / Alt+S)")
         act_new_cap = menu.addAction("➕ 新建极光胶囊分区...")
+        act_memo = menu.addAction("📝 显示 / 隐藏极光速记便签")
+        menu.addSeparator()
         act_add = menu.addAction("添加文件 / 图片 / PDF / 应用...")
         act_add_dir = menu.addAction("添加文件夹到此栏...")
         act_folder = menu.addAction(f"打开映射文件夹 ({self.folder_path.name})")
@@ -861,8 +1023,12 @@ class AICapsuleBar(AuroraBaseWindow):
 
         chosen = menu.exec(event.globalPos())
         self.set_menu_open(False)
-        if chosen == act_new_cap:
+        if chosen == act_search:
+            self.spotlightRequested.emit()
+        elif chosen == act_new_cap:
             self.contextActionTriggered.emit("create_capsule")
+        elif chosen == act_memo:
+            self.contextActionTriggered.emit("toggle_memo")
         elif chosen == act_add:
             if prompt_add_items_to_folder(self, self.folder_path):
                 self.reload_items()
@@ -883,10 +1049,28 @@ class AICapsuleBar(AuroraBaseWindow):
             self.contextActionTriggered.emit("toggle_visibility")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasFormat(AURORA_MIME_TYPE) or event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        drop_x = event.position().x()
+        if event.mimeData().hasFormat(AURORA_MIME_TYPE):
+            raw = bytes(event.mimeData().data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
+            if "|" in raw:
+                src_grp, src_path_str = raw.split("|", 1)
+                src_path = Path(src_path_str)
+                if src_grp == self.group_key:
+                    files = sort_group_items(self.group_key, list_valid_partition_items(self.folder_path), self._custom_order_provider(self.group_key))
+                    names = [p.name for p in files if p.name != src_path.name]
+                    target_idx = max(0, min(len(names), int((drop_x - 52) // 55)))
+                    names.insert(target_idx, src_path.name)
+                    self.orderChanged.emit(self.group_key, names)
+                    self.reload_items()
+                    return
+                elif src_path.exists():
+                    self.itemMoveRequested.emit(src_path, self.group_key)
+                    return
+
         for url in event.mimeData().urls():
             local = Path(url.toLocalFile())
             if local.exists():
@@ -898,13 +1082,18 @@ class AICapsuleBar(AuroraBaseWindow):
         painter = QPainter(self)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
 
-        # Left vertical minimalist aurora badge + subtle divider
-        badge_rect = QRectF(10.0, 14.0, 36.0, self.height() - 28.0)
+        c1, _, c2 = self.get_theme_colors()
+
+        # Left aurora badge
+        badge_rect = QRectF(10.0, 14.0, 34.0, self.height() - 28.0)
         grad = QLinearGradient(badge_rect.topLeft(), badge_rect.bottomRight())
-        grad.setColorAt(0.0, QColor(45, 212, 191, int(45 + 45 * self._border_glow)))
-        grad.setColorAt(1.0, QColor(168, 85, 247, int(45 + 45 * self._border_glow)))
+        bc1 = QColor(c1); bc1.setAlpha(int(48 + 45 * self._border_glow))
+        bc2 = QColor(c2); bc2.setAlpha(int(48 + 45 * self._border_glow))
+        grad.setColorAt(0.0, bc1)
+        grad.setColorAt(1.0, bc2)
         painter.setBrush(grad)
-        painter.setPen(QPen(QColor(45, 212, 191, int(95 + 75 * self._border_glow)), 1.0))
+        b_pen = QColor(c1); b_pen.setAlpha(int(95 + 75 * self._border_glow))
+        painter.setPen(QPen(b_pen, 1.0))
         painter.drawRoundedRect(badge_rect, 8.0, 8.0)
 
         disp_badge = self.badge_text[:3]
@@ -915,26 +1104,48 @@ class AICapsuleBar(AuroraBaseWindow):
         painter.setPen(QColor(255, 255, 255, 248))
         painter.drawText(badge_rect, Qt.AlignCenter, disp_badge)
 
-        # Hairline vertical separator
         painter.setPen(QPen(QColor(255, 255, 255, 24), 1.0))
-        painter.drawLine(QPointF(52.5, 15.0), QPointF(52.5, self.height() - 15.0))
+        painter.drawLine(QPointF(49.5, 15.0), QPointF(49.5, self.height() - 15.0))
+
+        # Right-side sleek Spotlight Search trigger pill
+        if self.show_search_pill:
+            sr = self._search_rect
+            s_alpha = 46 if self._hover_search else int(16 + 18 * self._border_glow)
+            painter.setBrush(QColor(255, 255, 255, s_alpha))
+            s_border = QColor(c1) if self._hover_search else QColor(255, 255, 255, 32)
+            if self._hover_search:
+                s_border.setAlpha(155)
+            painter.setPen(QPen(s_border, 1.0))
+            painter.drawRoundedRect(sr, 8.0, 8.0)
+
+            # Vector magnifying glass icon inside pill
+            cx, cy = sr.center().x() - 1.2, sr.center().y() - 1.2
+            icon_col = QColor(255, 255, 255, 245 if self._hover_search else 185)
+            pen = QPen(icon_col, 1.6)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), 4.6, 4.6)
+            painter.drawLine(QPointF(cx + 3.4, cy + 3.4), QPointF(cx + 6.8, cy + 6.8))
 
 
 class CollapsibleAuroraCard(AuroraBaseWindow):
-    """Collapsible Aurora glass partition card: smoothly rolls up into a slender 38px Aurora capsule 0.5s after mouse leave."""
+    """Collapsible Aurora glass partition card with cursor spotlight, wheel fold, and drag-to-reorder."""
     heightAnimated = Signal()
     pinToggled = Signal(str, bool)
     itemMoveRequested = Signal(Path, str)
+    orderChanged = Signal(str, list)
     contextActionTriggered = Signal(str)
     renameCapsuleRequested = Signal(str)
     deleteCapsuleRequested = Signal(str)
+    spotlightRequested = Signal()
 
-    CARD_WIDTH = 356
+    CARD_WIDTH = 368
     HEADER_HEIGHT = 38
     COLS = 5
-    TILE_W = 64
+    TILE_W = 66
     TILE_H = 68
-    GRID_PAD_X = 12
+    GRID_PAD_X = 13
     GRID_PAD_BOTTOM = 12
     GRID_SPACING_X = 3
     GRID_SPACING_Y = 4
@@ -949,8 +1160,15 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         all_groups: dict[str, tuple[str, Path]],
         pinned: bool = False,
         allow_drag_provider=None,
+        theme_provider=None,
+        opacity_provider=None,
+        custom_order_provider=None,
     ):
-        super().__init__(allow_drag_provider=allow_drag_provider)
+        super().__init__(
+            allow_drag_provider=allow_drag_provider,
+            theme_provider=theme_provider,
+            opacity_provider=opacity_provider,
+        )
         self.group_key = group_key
         self.title = title
         self.folder_path = folder_path
@@ -958,6 +1176,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self.header_font_family = header_font_family
         self.all_groups = all_groups
         self.pinned = pinned
+        self._custom_order_provider = custom_order_provider or (lambda _: [])
 
         self._expanded = True
         self._item_count = 0
@@ -972,13 +1191,11 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self._grid_container = QWidget(self)
         self._grid_container.setMouseTracking(True)
 
-        # Smooth roll-up / expand animation
         self._height_anim = QVariantAnimation(self)
         self._height_anim.setDuration(230)
         self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._height_anim.valueChanged.connect(self._on_height_val)
 
-        # Exact 0.5s (500ms) auto-roll-up timer on mouse leave
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.setInterval(500)
@@ -992,7 +1209,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             child.deleteLater()
 
         files = list_valid_partition_items(self.folder_path)
-        files = sort_group_items(self.group_key, files)
+        files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
         self._item_count = len(files)
 
         rows = max(1, math.ceil(len(files) / self.COLS))
@@ -1075,6 +1292,13 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             self._collapse_timer.start(500)
         super().leaveEvent(event)
 
+    def wheelEvent(self, event):
+        if event.angleDelta().y() > 0:
+            self.expand_card()
+        elif event.angleDelta().y() < 0 and event.position().y() <= self.HEADER_HEIGHT + 12:
+            self.collapse_card(force=True)
+        super().wheelEvent(event)
+
     def set_menu_open(self, is_open: bool):
         super().set_menu_open(is_open)
         if not is_open and not self.underMouse() and not self.pinned:
@@ -1089,7 +1313,11 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             self.update()
 
         if self._dragging and (event.buttons() & Qt.LeftButton):
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            # Magnetic snap to Left Golden Column (X=24)
+            if abs(new_pos.x() - 24) <= 12:
+                new_pos.setX(24)
+            self.move(new_pos)
             self.positionChangedByUser.emit()
         super().mouseMoveEvent(event)
 
@@ -1125,11 +1353,13 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
+        act_search = menu.addAction("🔍 极光全局搜索 (双击 Ctrl / Alt+S)")
         pin_label = "取消常驻展开 (恢复 0.5s 自动卷起)" if self.pinned else "常驻展开此卡片 (不自动卷起)"
         act_pin = menu.addAction(pin_label)
         act_toggle = menu.addAction("立即卷起为胶囊" if self._expanded else "展开卡片")
         menu.addSeparator()
         act_new_cap = menu.addAction("➕ 新建极光胶囊分区...")
+        act_memo = menu.addAction("📝 显示 / 隐藏极光速记便签")
         act_add = menu.addAction("添加文件 / 图片 / PDF / 应用...")
         act_add_dir = menu.addAction("添加文件夹到此分区...")
         act_folder = menu.addAction(f"打开映射文件夹 ({self.folder_path.name})")
@@ -1146,7 +1376,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         chosen = menu.exec(event.globalPos())
         self.set_menu_open(False)
 
-        if chosen == act_pin:
+        if chosen == act_search:
+            self.spotlightRequested.emit()
+        elif chosen == act_pin:
             self.pinned = not self.pinned
             self.pinToggled.emit(self.group_key, self.pinned)
             self.update()
@@ -1157,6 +1389,8 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 self.expand_card()
         elif chosen == act_new_cap:
             self.contextActionTriggered.emit("create_capsule")
+        elif chosen == act_memo:
+            self.contextActionTriggered.emit("toggle_memo")
         elif chosen == act_add:
             if prompt_add_items_to_folder(self, self.folder_path):
                 self.reload_items()
@@ -1181,10 +1415,31 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             self.contextActionTriggered.emit("toggle_visibility")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasFormat(AURORA_MIME_TYPE) or event.mimeData().hasUrls():
+            self.expand_card()
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        pos = event.position()
+        if event.mimeData().hasFormat(AURORA_MIME_TYPE):
+            raw = bytes(event.mimeData().data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
+            if "|" in raw:
+                src_grp, src_path_str = raw.split("|", 1)
+                src_path = Path(src_path_str)
+                if src_grp == self.group_key:
+                    files = sort_group_items(self.group_key, list_valid_partition_items(self.folder_path), self._custom_order_provider(self.group_key))
+                    names = [p.name for p in files if p.name != src_path.name]
+                    col = max(0, min(self.COLS - 1, int((pos.x() - self.GRID_PAD_X) // (self.TILE_W + self.GRID_SPACING_X))))
+                    row = max(0, int((pos.y() - self.HEADER_HEIGHT) // (self.TILE_H + self.GRID_SPACING_Y)))
+                    target_idx = max(0, min(len(names), row * self.COLS + col))
+                    names.insert(target_idx, src_path.name)
+                    self.orderChanged.emit(self.group_key, names)
+                    self.reload_items()
+                    return
+                elif src_path.exists():
+                    self.itemMoveRequested.emit(src_path, self.group_key)
+                    return
+
         for url in event.mimeData().urls():
             local = Path(url.toLocalFile())
             if local.exists():
@@ -1196,11 +1451,13 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         painter = QPainter(self)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
 
+        c1, _, c2 = self.get_theme_colors()
+
         # 1. Glowing Aurora dot indicator on header left
         dot_rect = QRectF(14.0, (self.HEADER_HEIGHT - 7.0) / 2.0, 7.0, 7.0)
         dot_grad = QLinearGradient(dot_rect.topLeft(), dot_rect.bottomRight())
-        dot_grad.setColorAt(0.0, self.EMERALD)
-        dot_grad.setColorAt(1.0, self.PURPLE)
+        dot_grad.setColorAt(0.0, c1)
+        dot_grad.setColorAt(1.0, c2)
         painter.setPen(Qt.NoPen)
         painter.setBrush(dot_grad)
         painter.drawEllipse(dot_rect)
@@ -1217,7 +1474,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         painter.setPen(QColor(255, 255, 255, title_alpha))
         painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, self.title)
 
-        # 3. Instant hover full-name reveal OR subtle item count pill on right
+        # 3. Instant hover full-name reveal OR item count pill on right
         if self._hovered_item_label and self._expanded:
             hov_font = make_apple_font(11, QFont.Medium, 0.0)
             painter.setFont(hov_font)
@@ -1226,7 +1483,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             hov_rect = QRectF(self.width() - 180.0, 0.0, 140.0, float(self.HEADER_HEIGHT))
             painter.setPen(QColor(0, 0, 0, 110))
             painter.drawText(hov_rect.translated(0, 1.0), Qt.AlignRight | Qt.AlignVCenter, hov_text)
-            painter.setPen(QColor(167, 243, 208, 245))
+            hov_col = QColor(c1).lighter(135)
+            hov_col.setAlpha(245)
+            painter.setPen(hov_col)
             painter.drawText(hov_rect, Qt.AlignRight | Qt.AlignVCenter, hov_text)
         else:
             cnt_font = make_apple_font(11, QFont.Medium, 0.0)
@@ -1235,17 +1494,17 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             cnt_rect = QRectF(self.width() - 66.0, 0.0, 26.0, float(self.HEADER_HEIGHT))
             painter.drawText(cnt_rect, Qt.AlignRight | Qt.AlignVCenter, str(self._item_count))
 
-        # 4. Minimalist Pin / Auto-collapse indicator button (top-right)
+        # 4. Pin / Auto-collapse indicator button
         if self.pinned or self._border_glow > 0.05:
             cx, cy = self._pin_rect.center().x(), self._pin_rect.center().y()
             if self.pinned:
-                # Filled emerald-ring indicator when pinned open
-                painter.setBrush(QColor(45, 212, 191, 210))
-                painter.setPen(QPen(QColor(45, 212, 191, 120), 2.0))
+                p_fill = QColor(c1); p_fill.setAlpha(210)
+                p_ring = QColor(c1); p_ring.setAlpha(120)
+                painter.setBrush(p_fill)
+                painter.setPen(QPen(p_ring, 2.0))
                 painter.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
             else:
-                # Subtle hollow ring when in 0.5s auto-collapse mode
-                alpha = 185 if self._hover_pin else int(95 * self._border_glow)
+                alpha = 190 if self._hover_pin else int(95 * self._border_glow)
                 painter.setBrush(Qt.NoBrush)
                 painter.setPen(QPen(QColor(220, 235, 255, alpha), 1.2))
                 painter.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
@@ -1253,9 +1512,11 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         # 5. Subtle hairline divider under header when expanded
         if self.height() > self.HEADER_HEIGHT + 8:
             div_grad = QLinearGradient(14.0, 0.0, self.width() - 14.0, 0.0)
-            div_grad.setColorAt(0.0, QColor(45, 212, 191, 42))
+            dc1 = QColor(c1); dc1.setAlpha(44)
+            dc2 = QColor(c2); dc2.setAlpha(38)
+            div_grad.setColorAt(0.0, dc1)
             div_grad.setColorAt(0.5, QColor(255, 255, 255, 20))
-            div_grad.setColorAt(1.0, QColor(168, 85, 247, 36))
+            div_grad.setColorAt(1.0, dc2)
             painter.setPen(QPen(div_grad, 1.0))
             painter.drawLine(
                 QPointF(14.0, float(self.HEADER_HEIGHT)),
