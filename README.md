@@ -1,48 +1,100 @@
-# AuroraDesktop v2.0 · 极光毛玻璃桌面收纳与全局搜索中心
+<div align="center">
 
-专为深色北极光壁纸深度定制的 Windows 11 桌面置底收纳 + Spotlight 全局检索套件（Apple `Inter + 思源黑体 Medium` 果味排版 + VisionOS 鼠标追光玻璃美学）。
+<img src="assets/aurora.png" width="96" alt="Aurora Desktop Logo"/>
 
-## v2.0 核心旗舰功能
+# Aurora Desktop · 极光桌面
 
-### 1. 🔍 极光全局搜索框（Aurora Spotlight）
-- **三种唤出方式**：
-  1. **连续轻按两下 `Ctrl` 键（双击 `Ctrl`）** —— 任何界面下秒级唤出/收起！
-  2. 全局快捷键 **`Alt + S`**
-  3. 点击顶部 `AI 悬浮胶囊栏` 最右侧的 **`🔍` 放大镜胶囊按钮**
-- **全能搜索与即时工具**：
-  - **支持中文拼音首字母 + 模糊匹配**：输入 `wx` 秒出微信、`wyy` 秒出网易云音乐、`vsc` 秒出 VS Code。
-  - **全量覆盖**：优先检索您所有极光胶囊内的应用、PDF、图片、文件夹，同时自动检索 **Windows 开始菜单全部已安装应用**。
-  - **即时科学计算器**：直接输入 `128 * 4.5`、`2^16`、`sqrt(2)`、`sin(pi/4)`，首行即时显示结果，按 `Enter` 一键复制。
-  - **系统快捷指令 & 网页直达**：输入 `ip` 查看并复制本机 IPv4；输入 `lock` / `锁屏` 一键锁屏；任意词条支持回车直接打开网页搜索。
-  - **快捷键**：`↑ / ↓` 选择，`Enter` 打开，`Ctrl + Enter` 以管理员身份运行，`Alt + Enter` 打开文件所在位置，`Esc` 关闭。
+**Windows 11 桌面美学套件：毛玻璃收纳 · 全局搜索 · 艺术时钟 · 全透明任务栏**
 
-### 2. ✨ 殿堂级流光微交互效果
-- **VisionOS / Linear 鼠标追光描边**：鼠标滑过任意卡片时，`1px` 极光边框会跟随光标位置产生高光折射，并在玻璃内部投射柔和的流光漫反射。
-- **图标主色自适应光晕（Color-Adaptive Aura）**：自动提取每个图标的主题色（如 Claude 珊瑚橙、VS Code 冰晶蓝、微信翡翠绿），悬停时绽放专属色彩玻璃背光与弹簧微浮效果。
-- **点击极光波纹（Ripple）**：单击启动应用时绽放丝滑扩散光环。
-- **4 套极光色温 + 3 档毛玻璃通透度**：在右下角系统托盘右键菜单可随时一键切换 `🌌 北极光翠紫`、`🧊 冰川极昼蓝`、`🌸 星云流光粉`、`❄️ VisionOS 纯白霜玻璃` 以及玻璃深浅度。
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
+[![Release](https://img.shields.io/github/v/release/ciinob/AuroraDesktop?color=2dd4bf&label=Release)](https://github.com/ciinob/AuroraDesktop/releases)
+[![Built with](https://img.shields.io/badge/Built%20with-PySide6%20%2B%20C%2B%2B-a855f7)](https://github.com/ciinob/AuroraDesktop)
 
-### 3. 📝 极光速记便签卡 & 自由拖拽排序
-- **极光速记便签（Quick Memo）**：右键任意卡片或托盘 -> **「📝 显示 / 隐藏极光速记便签」**，随时记录灵感、公式或待办清单，自动实时保存至 `D:\AuroraDesktop\memo.txt`，同样支持 0.5s 自动卷起。
-- **图标自由拖拽排序 & 跨胶囊直拖搬家**：按住任意图标拖动即可在同卡片内自由调整顺序，或直接拖进其他胶囊完成分组迁移！
-- **滚轮手势 & 磁吸对齐**：在标题栏向上滚轮展开、向下滚轮卷起；拖动卡片靠近左侧黄金列自动磁吸对齐。
+单文件、免安装、开机自启。双击 `AuroraDesktop.exe`，桌面即刻焕然一新。
 
-### 4. 🕒 艺术桌面时钟（托盘 / 时钟右键 →「🎨 时钟高定字体风格」）
-| 风格 | 字体 | 亮点 |
-| --- | --- | --- |
-| ✨ 极光纤雅几何风 | Outfit ExtraLight | 极光渐变双点冒号 + 流光细线 |
-| 🌈 极光渐变大字风 | Outfit Light | 干净几何数字填充主题极光渐变 + 柔光晕，深浅壁纸通吃 |
-| 🌌 极光流光花体风 | Playfair Display Italic × Great Vibes | 数字随主题色温流光渐变 + 柔光晕，下方花体 *Wednesday, the 25th of November* |
-| 🏛️ 高定古典衬线风 | Cormorant Garamond | 古典旧式数字 + 菱形冒号 + 菱形饰纹分隔线 |
-| 🕰️ 罗马铭文古典风 | Cormorant Italic | 象牙白斜体数字 + 罗马纪年 `XXV · XI · MMXXVI` |
-| 🖌️ 东方书韵行楷风 | 华文行楷 × 思源宋体 | 干支纪年 + 二十四节气 + 朱红「时辰」阳刻印章 |
-| 🍎 macOS 锁屏中文风 | Outfit Light | 中文日期眉题，节气当天自动显示节气 |
-| ✍️ 手写艺术分层风 | Ruthligos | 极光流光手写星期 + 纤细数字 |
+</div>
 
-- 冒号、分隔线与花体渐变实时跟随 `🎨 极光流光色温` 切换；多层柔和暗影保证亮色壁纸上依旧清晰。
-- 切换风格时丝滑交叉淡入；鼠标悬停浮现毛玻璃边框提示可拖拽（点击穿透模式下自动隐藏）。
-- 按「秒 / 分钟边界」精准对齐刷新，不显示秒数时每分钟仅重绘一次，常驻零负担；支持多显示器位置记忆与屏幕水平居中磁吸。
+---
 
-## 开发者维护脚本
-- `dev_run.bat`：关闭 `.exe` 并以 Python 源码极速运行调试（0.5 秒启动）
-- `rebuild_exe.bat`：一键 PyInstaller 重新打包并热替换正在运行的 `AuroraDesktop.exe`
+## ✨ 它是什么
+
+Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：把你凌乱的桌面图标收进一排**极光毛玻璃胶囊卡片**，用 **Spotlight 式全局搜索**秒开任何应用，右上角挂一枚**高定艺术时钟**，再配一条**真正全透明、能看见壁纸的任务栏**。
+
+没有臃肿的框架，没有后台驻留的累赘——一个 exe，全部搞定。
+
+## 🚀 四大核心能力
+
+### 🔍 极光全局搜索（Aurora Spotlight）
+任何界面下，**连按两下 `Ctrl`**（或 `Alt + S`）秒级唤出：
+
+- **拼音首字母模糊匹配**：输入 `wx` 秒出微信、`wyy` 出网易云、`vsc` 出 VS Code
+- **全覆盖检索**：胶囊内的应用 / PDF / 图片 / 文件夹 + 开始菜单全部已安装应用
+- **即时计算器**：`128 * 4.5`、`sqrt(2)`、`sin(pi/4)`，回车直接复制结果
+- **系统指令**：输入 `lock` 锁屏、`ip` 查本机 IP，任意词条回车直达网页搜索
+
+| 按键 | 作用 |
+| --- | --- |
+| `↑` / `↓` | 选择结果 |
+| `Enter` | 打开 |
+| `Ctrl + Enter` | 以管理员身份运行 |
+| `Alt + Enter` | 打开文件所在位置 |
+| `Esc` | 关闭 |
+
+### 🧊 极光胶囊收纳
+- 桌面图标按 **AI 工具 / 研发 / 娱乐 / 网络工具 / 文档** 自动分组进毛玻璃卡片，自动卷起、磁吸对齐
+- **图标自由拖拽排序**，跨胶囊直接拖放搬家
+- **VisionOS 鼠标追光描边**：1px 极光边框随光标折射高光，图标主题色自适应光晕（Claude 珊瑚橙、VS Code 冰晶蓝、微信翡翠绿……）
+- 4 套极光色温 × 3 档玻璃通透度，托盘右键一键切换
+
+### 🕒 高定艺术桌面时钟
+8 种手工调校的字体风格，冒号与饰线实时跟随主题色温，秒/分钟边界精准对齐刷新（不显示秒时每分钟仅重绘一次，零负担）：
+
+| 风格 | 字体 |
+| --- | --- |
+| ✨ 极光纤雅几何风 | Outfit ExtraLight |
+| 🌈 极光渐变大字风 | Outfit Light（主题流光渐变） |
+| 🌌 极光流光花体风 | Playfair Display Italic × Great Vibes |
+| 🏛️ 高定古典衬线风 | Cormorant Garamond |
+| 🕰️ 罗马铭文古典风 | Cormorant Italic · 罗马纪年 |
+| 🖌️ 东方书韵行楷风 | 华文行楷 · 干支节气 · 时辰印章 |
+| 🍎 macOS 锁屏中文风 | Outfit Light |
+| ✍️ 手写艺术分层风 | Ruthligos |
+
+深色壁纸上的 8 种风格：
+
+![深色壁纸下的时钟风格](docs/images/clock-styles-dark.png)
+
+浅色壁纸上依旧清晰（多层柔和暗影光晕）：
+
+![浅色壁纸下的时钟风格](docs/images/clock-styles-light.png)
+
+### 🪟 全透明任务栏引擎
+自绘 C++ 原生引擎（`AuroraTaskbarTAP.dll`，XAML `BackgroundFill` + Win32 `ACCENT_ENABLE_TRANSPARENTGRADIENT` 双管齐下），任务栏真正"消失"，壁纸从屏幕顶部贯穿到底部——彻底告别 TranslucentTB 的黑边冲突。
+
+## 📦 安装与使用
+
+1. 前往 [**Releases**](https://github.com/ciinob/AuroraDesktop/releases) 下载 `AuroraDesktop.exe`
+2. 双击运行，搞定。单文件免安装，首次启动自动登记开机自启
+3. 右键托盘图标：切换主题色温 / 玻璃通透度 / 时钟风格 / 速记便签
+
+> 系统要求：Windows 11（24H2 已验证）
+
+## 🛠️ 从源码运行
+
+```bash
+pip install -r requirements.txt   # PySide6 / pywin32
+python src/main.py                # dev_run.bat 一键调试
+rebuild_exe.bat                   # PyInstaller 打包并热替换运行中的 exe
+```
+
+## 🧱 技术栈
+
+- **UI 层**：Python 3.13 + PySide6（自绘毛玻璃、QPainterPath 文字光晕、高刷新动画）
+- **原生层**：C++ XAML 任务栏引擎 + Win32 API（置底、点击穿透、全局热键）
+- **字体排版**：Outfit / Cormorant Garamond / Playfair Display / Great Vibes / Ruthligos / 华文行楷，全部随包内置
+
+---
+
+<div align="center">
+如果它让你的桌面好看了一点，欢迎点个 ⭐ Star
+</div>
