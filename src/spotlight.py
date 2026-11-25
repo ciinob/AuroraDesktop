@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from animator import HighRefreshAnimation
 from icon_extractor import ShortcutIconLoader, format_display_name
 from pinyin_helper import fuzzy_match_score
 from win32_utils import apply_acrylic_and_rounded_corners
@@ -322,15 +323,16 @@ class AuroraSpotlightOverlay(QWidget):
         root_layout.addWidget(top_bar)
         root_layout.addWidget(self.result_list)
 
-        # Flowing aurora border shimmer timer while Spotlight is visible
+        # Flowing aurora border shimmer timer while Spotlight is visible (matched to high refresh)
         self._shimmer_timer = QTimer(self)
-        self._shimmer_timer.setInterval(32)
+        self._shimmer_timer.setTimerType(Qt.PreciseTimer)
+        self._shimmer_timer.setInterval(8)
         self._shimmer_timer.timeout.connect(self._tick_shimmer)
 
-        # Fade entrance animation
-        self._fade_anim = QVariantAnimation(self)
-        self._fade_anim.setDuration(150)
-        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        # 240Hz Fade entrance animation
+        self._fade_anim = HighRefreshAnimation(self)
+        self._fade_anim.setDuration(140)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutQuart)
         self._fade_anim.valueChanged.connect(lambda v: self.setWindowOpacity(float(v)))
 
         # Lazily index Windows Start Menu shortcuts in background after 1.5s

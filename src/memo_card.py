@@ -3,6 +3,7 @@ from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAn
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QMenu, QPlainTextEdit
 
+from animator import HighRefreshAnimation
 from paths import DATA_ROOT
 from widgets import AuroraBaseWindow, MENU_QSS, make_apple_font
 
@@ -36,7 +37,11 @@ class AuroraMemoCard(AuroraBaseWindow):
         self._pin_rect = QRectF(self.CARD_WIDTH - 34, 9, 20, 20)
         self._hover_pin = False
 
-        self.setFixedSize(self.CARD_WIDTH, self.EXPANDED_HEIGHT)
+        self.setFixedWidth(self.CARD_WIDTH)
+        self.setMinimumHeight(self.HEADER_HEIGHT)
+        self.setMaximumHeight(2000)
+        self.resize(self.CARD_WIDTH, self.EXPANDED_HEIGHT)
+        self._target_anim_h = self.EXPANDED_HEIGHT
 
         self.editor = QPlainTextEdit(self)
         self.editor.setGeometry(12, self.HEADER_HEIGHT + 6, self.CARD_WIDTH - 24, self.EXPANDED_HEIGHT - self.HEADER_HEIGHT - 16)
@@ -75,9 +80,9 @@ class AuroraMemoCard(AuroraBaseWindow):
         self._save_timer.timeout.connect(self._save_memo)
         self.editor.textChanged.connect(lambda: self._save_timer.start())
 
-        self._height_anim = QVariantAnimation(self)
-        self._height_anim.setDuration(220)
-        self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._height_anim = HighRefreshAnimation(self)
+        self._height_anim.setDuration(190)
+        self._height_anim.setEasingCurve(QEasingCurve.OutQuart)
         self._height_anim.valueChanged.connect(self._on_height_val)
 
         self._collapse_timer = QTimer(self)
@@ -91,9 +96,12 @@ class AuroraMemoCard(AuroraBaseWindow):
         except Exception:
             pass
 
+    def desired_stack_height(self) -> int:
+        return self._target_anim_h
+
     def _on_height_val(self, val):
-        h = int(val)
-        self.setFixedHeight(h)
+        h = max(self.HEADER_HEIGHT, int(round(val)))
+        self._target_anim_h = h
         self.editor.setVisible(h > self.HEADER_HEIGHT + 24)
         self.heightAnimated.emit()
 

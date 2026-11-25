@@ -44,6 +44,7 @@ from win32_utils import (
     VK_S,
     WM_AURORA_SHOW,
     WM_HOTKEY,
+    batch_defer_window_rects,
     get_current_desktop_name,
     send_to_bottom,
     user32,
@@ -403,18 +404,29 @@ class AuroraController(QObject):
 
         col_x = start_x
         curr_y = start_y
+        updates: list[tuple[int, int, int, int, int]] = []
 
         for idx, w in enumerate(self._all_stackable_windows()):
             if w.group_key in self.dragged_keys:
+                if hasattr(w, "desired_stack_height"):
+                    dh = w.desired_stack_height()
+                    if w.height() != dh:
+                        updates.append((int(w.winId()), w.x(), w.y(), w.width(), dh))
                 continue
-            if curr_y > start_y and (curr_y + w.height() > max_bottom):
+
+            target_h = w.desired_stack_height() if hasattr(w, "desired_stack_height") else w.height()
+            if curr_y > start_y and (curr_y + target_h > max_bottom):
                 col_x += self.CARD_W + self.COL_GAP
                 curr_y = start_y
 
-            if w.x() != col_x or w.y() != curr_y:
-                w.move(col_x, curr_y)
+            if w.x() != col_x or w.y() != curr_y or w.height() != target_h:
+                updates.append((int(w.winId()), col_x, curr_y, w.width(), target_h))
+
             extra_gap = 2 if idx == 0 else 0
-            curr_y += w.height() + self.CARD_GAP + extra_gap
+            curr_y += target_h + self.CARD_GAP + extra_gap
+
+        if updates:
+            batch_defer_window_rects(updates)
 
     def set_aurora_theme(self, theme_key: str):
         if theme_key not in AURORA_THEMES:

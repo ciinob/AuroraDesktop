@@ -28,6 +28,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
+SWP_NOCOPYBITS = 0x0100
 SWP_NOSENDCHANGING = 0x0400
 
 WM_WINDOWPOSCHANGING = 0x0046
@@ -137,6 +138,19 @@ user32.SetWindowPos.argtypes = [
     wintypes.UINT,
 ]
 user32.SetWindowPos.restype = wintypes.BOOL
+
+user32.BeginDeferWindowPos.argtypes = [ctypes.c_int]
+user32.BeginDeferWindowPos.restype = wintypes.HANDLE
+
+user32.DeferWindowPos.argtypes = [
+    wintypes.HANDLE, wintypes.HWND, wintypes.HWND,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.UINT,
+]
+user32.DeferWindowPos.restype = wintypes.HANDLE
+
+user32.EndDeferWindowPos.argtypes = [wintypes.HANDLE]
+user32.EndDeferWindowPos.restype = wintypes.BOOL
 
 user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = LONG_PTR
@@ -303,6 +317,23 @@ def send_to_bottom(hwnd: int):
         0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
     )
+
+
+def batch_defer_window_rects(rect_updates: list[tuple[int, int, int, int, int]]):
+    """Atomically move & resize multiple HWNDs in one single 240Hz DWM composition transaction!
+    Each tuple is (hwnd, x, y, width, height).
+    """
+    if not rect_updates:
+        return
+    hdwp = user32.BeginDeferWindowPos(len(rect_updates))
+    if not hdwp:
+        return
+    flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
+    for hwnd, x, y, w, h in rect_updates:
+        hdwp = user32.DeferWindowPos(hdwp, hwnd, None, x, y, w, h, flags)
+        if not hdwp:
+            return
+    user32.EndDeferWindowPos(hdwp)
 
 
 def is_click_on_blank_desktop(x: int, y: int, own_hwnds: set[int]) -> bool:

@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from animator import HighRefreshAnimation
 from icon_extractor import ShortcutIconLoader, format_display_name
 from paths import DATA_ROOT
 from win32_utils import (
@@ -479,13 +480,13 @@ class AuroraIconTile(QWidget):
         self._ripple_progress = 0.0
         self._ripple_active = False
 
-        self._anim = QVariantAnimation(self)
-        self._anim.setDuration(170)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim = HighRefreshAnimation(self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.OutQuart)
         self._anim.valueChanged.connect(self._on_anim_val)
 
-        self._ripple_anim = QVariantAnimation(self)
-        self._ripple_anim.setDuration(340)
+        self._ripple_anim = HighRefreshAnimation(self)
+        self._ripple_anim.setDuration(300)
         self._ripple_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._ripple_anim.valueChanged.connect(self._on_ripple_val)
         self._ripple_anim.finished.connect(self._on_ripple_done)
@@ -712,14 +713,14 @@ class AuroraBaseWindow(QWidget):
         self.setMouseTracking(True)
 
         self._border_glow = 0.0
-        self._glow_anim = QVariantAnimation(self)
-        self._glow_anim.setDuration(240)
-        self._glow_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._glow_anim = HighRefreshAnimation(self)
+        self._glow_anim.setDuration(200)
+        self._glow_anim.setEasingCurve(QEasingCurve.OutQuart)
         self._glow_anim.valueChanged.connect(self._on_glow_changed)
 
-        self._fade_anim = QVariantAnimation(self)
-        self._fade_anim.setDuration(240)
-        self._fade_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._fade_anim = HighRefreshAnimation(self)
+        self._fade_anim.setDuration(200)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutQuart)
         self._fade_anim.valueChanged.connect(self._on_fade_val)
         self._fade_anim.finished.connect(self._on_fade_finished)
         self._hiding_after_fade = False
@@ -1182,19 +1183,25 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self._item_count = 0
         self._hovered_item_label = ""
         self._expanded_height = 180
+        self._target_anim_h = 180
+        self._animating_height = False
+        self._grid_snapshot: QPixmap | None = None
         self._pin_rect = QRectF(self.CARD_WIDTH - 34, 9, 20, 20)
         self._hover_pin = False
 
         self.setFixedWidth(self.CARD_WIDTH)
+        self.setMinimumHeight(self.HEADER_HEIGHT)
+        self.setMaximumHeight(2000)
         self.setAcceptDrops(True)
 
         self._grid_container = QWidget(self)
         self._grid_container.setMouseTracking(True)
 
-        self._height_anim = QVariantAnimation(self)
-        self._height_anim.setDuration(230)
-        self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._height_anim = HighRefreshAnimation(self)
+        self._height_anim.setDuration(195)
+        self._height_anim.setEasingCurve(QEasingCurve.OutQuart)
         self._height_anim.valueChanged.connect(self._on_height_val)
+        self._height_anim.finished.connect(self._on_height_anim_finished)
 
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
@@ -1202,7 +1209,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self._collapse_timer.timeout.connect(self._on_collapse_timeout)
 
         self.reload_items()
-        self.setFixedHeight(self._expanded_height)
+        self.resize(self.CARD_WIDTH, self._expanded_height)
 
     def reload_items(self):
         for child in self._grid_container.findChildren(AuroraIconTile):
@@ -1235,8 +1242,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             tile.moveRequested.connect(self.itemMoveRequested.emit)
             tile.hoverNameChanged.connect(self._on_tile_hovered)
 
-        if self._expanded:
-            self.setFixedHeight(self._expanded_height)
+        self._grid_snapshot = None
+        if self._expanded and not self._animating_height:
+            self.resize(self.CARD_WIDTH, self._expanded_height)
             self._grid_container.setVisible(True)
             self.heightAnimated.emit()
         self.update()
@@ -1245,35 +1253,64 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self._hovered_item_label = full_name
         self.update()
 
+    def _capture_grid_snapshot(self):
+        if self._grid_snapshot is None or self._grid_snapshot.size() != self._grid_container.size():
+            was_vis = self._grid_container.isVisible()
+            if not was_vis:
+                self._grid_container.setGeometry(0, self.HEADER_HEIGHT, self.CARD_WIDTH, self._expanded_height - self.HEADER_HEIGHT)
+                self._grid_container.show()
+            self._grid_snapshot = self._grid_container.grab()
+            if not was_vis:
+                self._grid_container.hide()
+
     def _on_height_val(self, val):
-        h = int(val)
-        self.setFixedHeight(h)
-        self._grid_container.setVisible(h > self.HEADER_HEIGHT + 6)
+        self._target_anim_h = max(self.HEADER_HEIGHT, int(round(val)))
+        # Delegate actual Win32 DeferWindowPos resize + stack cascade to controller in one atomic 240Hz batch!
         self.heightAnimated.emit()
+        self.update()
+
+    def _on_height_anim_finished(self):
+        self._animating_height = False
+        final_h = self._expanded_height if self._expanded else self.HEADER_HEIGHT
+        self._target_anim_h = final_h
+        self.resize(self.CARD_WIDTH, final_h)
+        self._grid_container.setVisible(self._expanded)
+        self.heightAnimated.emit()
+        self.update()
+
+    def desired_stack_height(self) -> int:
+        return self._target_anim_h if self._animating_height else self.height()
 
     def expand_card(self):
         self._collapse_timer.stop()
-        if self._expanded and self.height() == self._expanded_height:
+        if self._expanded and not self._animating_height and self.height() == self._expanded_height:
             return
+        start_h = self.desired_stack_height()
         self._expanded = True
-        self._grid_container.setVisible(True)
+        self._capture_grid_snapshot()
+        self._grid_container.setVisible(False)
+        self._animating_height = True
         self._height_anim.stop()
-        self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._height_anim.setDuration(220)
-        self._height_anim.setStartValue(self.height())
+        self._height_anim.setEasingCurve(QEasingCurve.OutQuart)
+        self._height_anim.setDuration(185)
+        self._height_anim.setStartValue(start_h)
         self._height_anim.setEndValue(self._expanded_height)
         self._height_anim.start()
 
     def collapse_card(self, force: bool = False):
         if (self.pinned or self._menu_open) and not force:
             return
-        if not self._expanded and self.height() == self.HEADER_HEIGHT:
+        if not self._expanded and not self._animating_height and self.height() == self.HEADER_HEIGHT:
             return
+        start_h = self.desired_stack_height()
         self._expanded = False
+        self._capture_grid_snapshot()
+        self._grid_container.setVisible(False)
+        self._animating_height = True
         self._height_anim.stop()
-        self._height_anim.setEasingCurve(QEasingCurve.InOutCubic)
-        self._height_anim.setDuration(240)
-        self._height_anim.setStartValue(self.height())
+        self._height_anim.setEasingCurve(QEasingCurve.OutQuart)
+        self._height_anim.setDuration(195)
+        self._height_anim.setStartValue(start_h)
         self._height_anim.setEndValue(self.HEADER_HEIGHT)
         self._height_anim.start()
 
@@ -1509,8 +1546,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 painter.setPen(QPen(QColor(220, 235, 255, alpha), 1.2))
                 painter.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
 
-        # 5. Subtle hairline divider under header when expanded
-        if self.height() > self.HEADER_HEIGHT + 8:
+        # 5. Subtle hairline divider + fast 240Hz cached grid snapshot during roll-up/expand animation!
+        cur_h = self.height()
+        if cur_h > self.HEADER_HEIGHT + 8:
             div_grad = QLinearGradient(14.0, 0.0, self.width() - 14.0, 0.0)
             dc1 = QColor(c1); dc1.setAlpha(44)
             dc2 = QColor(c2); dc2.setAlpha(38)
@@ -1522,3 +1560,15 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 QPointF(14.0, float(self.HEADER_HEIGHT)),
                 QPointF(self.width() - 14.0, float(self.HEADER_HEIGHT)),
             )
+
+            if self._animating_height and self._grid_snapshot is not None and not self._grid_snapshot.isNull():
+                span = max(1.0, float(self._expanded_height - self.HEADER_HEIGHT))
+                prog = max(0.0, min(1.0, (cur_h - self.HEADER_HEIGHT) / span))
+                painter.save()
+                clip_r = QRectF(1.0, float(self.HEADER_HEIGHT + 1), self.width() - 2.0, max(0.0, cur_h - self.HEADER_HEIGHT - 4.0))
+                painter.setClipRect(clip_r)
+                painter.setOpacity(prog * prog)
+                # Subtle 6px vertical glide during unfold
+                y_offset = -6.0 * (1.0 - prog)
+                painter.drawPixmap(QPointF(0.0, float(self.HEADER_HEIGHT) + y_offset), self._grid_snapshot)
+                painter.restore()
