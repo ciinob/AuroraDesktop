@@ -14,3 +14,5 @@ memo.txt
 /AuroraTaskbarTAP.dll
 # MSVC import library is a build artifact, not needed at runtime
 /assets/AuroraTaskbarTAP.lib
+AuroraDesktop-*.exe
+SHA256SUMS.txt
