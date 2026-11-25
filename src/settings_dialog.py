@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -51,7 +52,17 @@ from clock_widget import CLOCK_STYLES
 from icon_extractor import format_display_name
 from paths import APP_VERSION, DATA_ROOT, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
 from taskbar_engine import TASKBAR_MODES
-from widgets import AURORA_THEMES, DIALOG_QSS, GLASS_OPACITY_LEVELS, NewCapsuleDialog, extract_vibrant_accent, make_apple_font
+from widgets import (
+    AURORA_THEMES,
+    DIALOG_QSS,
+    GLASS_OPACITY_LEVELS,
+    MENU_QSS,
+    NewCapsuleDialog,
+    SYSTEM_SHELL_ITEMS,
+    create_system_shell_shortcut,
+    extract_vibrant_accent,
+    make_apple_font,
+)
 from win32_utils import apply_dark_title_bar, format_hotkey_label
 
 if TYPE_CHECKING:
@@ -864,6 +875,10 @@ class AuroraSettingsWindow(QWidget):
         g_act_row.addWidget(b_open_dir)
         d_lay.addLayout(g_act_row)
 
+        self.btn_add_sys_item = QPushButton("🖥️ 一键添加系统图标（此电脑 / 回收站 / 控制面板 / 网络 / 下载） ▾")
+        self.btn_add_sys_item.clicked.connect(self._on_add_system_item_menu)
+        d_lay.addWidget(self.btn_add_sys_item)
+
         jump_btn = QPushButton("🎨 前往「图标自定义」管理此分组内的图标 →")
         jump_btn.clicked.connect(self._jump_to_group_icons)
         d_lay.addWidget(jump_btn)
@@ -973,6 +988,22 @@ class AuroraSettingsWindow(QWidget):
     def _on_open_selected_group_folder(self):
         if self._selected_group_key:
             self.ctrl.open_partition_folder(self._selected_group_key)
+
+    def _on_add_system_item_menu(self):
+        if not self._selected_group_key:
+            return
+        part = next((p for p in self.ctrl.partitions if p["key"] == self._selected_group_key), None)
+        if not part:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS)
+        actions = {menu.addAction(v["label"]): k for k, v in SYSTEM_SHELL_ITEMS.items()}
+        chosen = menu.exec(self.btn_add_sys_item.mapToGlobal(self.btn_add_sys_item.rect().bottomLeft()))
+        if chosen in actions:
+            dest_folder = GROUPS_DIR / part["folder"]
+            if create_system_shell_shortcut(actions[chosen], dest_folder):
+                self.ctrl.reload_all_groups()
+                self.refresh_all()
 
     def _jump_to_group_icons(self):
         key = self._selected_group_key

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 import win32com.client
 
@@ -76,8 +77,121 @@ shell32.ShellExecuteW.argtypes = [
     wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int,
 ]
 shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+shell32.SHEmptyRecycleBinW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.DWORD]
+shell32.SHEmptyRecycleBinW.restype = ctypes.c_long
 
 AURORA_MIME_TYPE = "application/x-aurora-shortcut-item"
+SHELL_IDLIST_MIME = 'application/x-qt-windows-mime;value="Shell IDList Array"'
+
+# Built-in Windows virtual Shell items (This PC, Recycle Bin, Control Panel, Network, Downloads, User Folder)
+SYSTEM_SHELL_ITEMS: dict[str, dict] = {
+    "this_pc": {
+        "label": "🖥️ 此电脑 (This PC)",
+        "name": "此电脑",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+        "icon": r"C:\Windows\System32\imageres.dll,-109",
+        "clsids": ["20d04fe0-3aea-1069-a2d8-08002b30309d"],
+    },
+    "recycle_bin": {
+        "label": "🗑️ 回收站 (Recycle Bin)",
+        "name": "回收站",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "::{645FF040-5081-101B-9F08-00AA002F954E}",
+        "icon": r"C:\Windows\System32\imageres.dll,-54",
+        "clsids": ["645ff040-5081-101b-9f08-00aa002f954e"],
+    },
+    "downloads": {
+        "label": "📥 下载文件夹 (Downloads)",
+        "name": "下载",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "shell:Downloads",
+        "icon": r"C:\Windows\System32\imageres.dll,-184",
+        "clsids": ["374de290-123f-4565-9164-39c4925e467b", "088e3905-0323-4b02-9826-5d99428e115f"],
+    },
+    "user_files": {
+        "label": "👤 个人主目录 (User Folder)",
+        "name": "个人文件夹",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "shell:UsersFilesFolder",
+        "icon": r"C:\Windows\System32\imageres.dll,-123",
+        "clsids": ["59031a47-3f72-44a7-89c5-5595fe6b30ee"],
+    },
+    "control_panel": {
+        "label": "🎛️ 控制面板 (Control Panel)",
+        "name": "控制面板",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "shell:ControlPanelFolder",
+        "icon": r"C:\Windows\System32\imageres.dll,-27",
+        "clsids": ["26ee0668-a00a-44d7-9371-beb064c98683", "5399e694-6ce5-4d6c-8fce-1d8870fdcba0"],
+    },
+    "network": {
+        "label": "🌐 网络邻居 (Network)",
+        "name": "网络",
+        "target": r"C:\Windows\explorer.exe",
+        "args": "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}",
+        "icon": r"C:\Windows\System32\imageres.dll,-25",
+        "clsids": ["f02c1a0d-be21-4350-88b0-7367fc96ef3c", "208d2c60-3aea-1069-a2d7-08002b30309d"],
+    },
+}
+
+
+def create_system_shell_shortcut(item_key: str, dest_folder: Path) -> Path | None:
+    """Create a crisp native Windows 11 shortcut for virtual desktop icons like This PC or Recycle Bin."""
+    spec = SYSTEM_SHELL_ITEMS.get(item_key)
+    if not spec:
+        return None
+    dest_folder.mkdir(parents=True, exist_ok=True)
+    lnk_path = dest_folder / f"{spec['name']}.lnk"
+    shell = win32com.client.Dispatch("WScript.Shell")
+    sc = shell.CreateShortcut(str(lnk_path))
+    sc.TargetPath = spec["target"]
+    sc.Arguments = spec["args"]
+    sc.IconLocation = spec["icon"]
+    sc.Description = spec["label"]
+    sc.Save()
+    return lnk_path
+
+
+def has_shell_idlist_mime(mime_data: QMimeData) -> bool:
+    return mime_data.hasFormat(SHELL_IDLIST_MIME) or any(
+        "Shell IDList Array" in fmt for fmt in mime_data.formats()
+    )
+
+
+def import_shell_idlist_drop(mime_data: QMimeData, dest_folder: Path) -> bool:
+    """Detect virtual Windows Desktop icons (This PC, Recycle Bin, etc.) dragged from Explorer via CIDA PIDL GUIDs."""
+    fmt = SHELL_IDLIST_MIME
+    if not mime_data.hasFormat(fmt):
+        fmt = next((f for f in mime_data.formats() if "Shell IDList Array" in f), "")
+    if not fmt:
+        return False
+    raw = bytes(mime_data.data(fmt))
+    if not raw:
+        return False
+
+    imported = False
+    for item_key, spec in SYSTEM_SHELL_ITEMS.items():
+        for clsid_str in spec["clsids"]:
+            if uuid.UUID(clsid_str).bytes_le in raw:
+                if create_system_shell_shortcut(item_key, dest_folder):
+                    imported = True
+                break
+    return imported
+
+
+def is_recycle_bin_shortcut(item_path: Path) -> bool:
+    if item_path.stem.lower() in ("回收站", "recycle bin"):
+        return True
+    if item_path.suffix.lower() == ".lnk":
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            sc = shell.CreateShortcut(str(item_path))
+            if "645ff040-5081-101b-9f08-00aa002f954e" in (sc.Arguments or "").lower():
+                return True
+        except Exception:
+            pass
+    return False
 
 # Aurora color palettes: (Primary, Mid, Secondary, Display Label)
 AURORA_THEMES: dict[str, tuple[QColor, QColor, QColor, str]] = {
@@ -581,6 +695,9 @@ class AuroraIconTile(QWidget):
         menu.setStyleSheet(MENU_QSS)
 
         act_open = menu.addAction(f"打开 {self.short_name}")
+        act_empty_bin = None
+        if is_recycle_bin_shortcut(self.item_path):
+            act_empty_bin = menu.addAction("🧹 清空回收站...")
         act_admin = menu.addAction("以管理员身份运行")
         act_loc = menu.addAction("打开文件所在位置")
         menu.addSeparator()
@@ -604,6 +721,8 @@ class AuroraIconTile(QWidget):
 
         if chosen == act_open:
             launch_item(self.item_path)
+        elif act_empty_bin is not None and chosen == act_empty_bin:
+            shell32.SHEmptyRecycleBinW(None, None, 0)
         elif chosen == act_admin:
             launch_item(self.item_path, run_as_admin=True)
         elif chosen == act_loc:
@@ -1015,6 +1134,9 @@ class AICapsuleBar(AuroraBaseWindow):
         menu.setStyleSheet(MENU_QSS)
         act_add = menu.addAction("➕ 添加应用 / 文件...")
         act_add_dir = menu.addAction("📁 添加文件夹...")
+        sys_menu = menu.addMenu("🖥️ 添加系统图标 (此电脑 / 回收站)")
+        sys_menu.setStyleSheet(MENU_QSS)
+        sys_actions = {sys_menu.addAction(v["label"]): k for k, v in SYSTEM_SHELL_ITEMS.items()}
         act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
         menu.addSeparator()
         act_settings = menu.addAction("⚙️ 管理此分组 / 打开设置中心...")
@@ -1028,6 +1150,9 @@ class AICapsuleBar(AuroraBaseWindow):
         elif chosen == act_add_dir:
             if prompt_add_directory_to_folder(self, self.folder_path):
                 self.reload_items()
+        elif chosen in sys_actions:
+            if create_system_shell_shortcut(sys_actions[chosen], self.folder_path):
+                self.reload_items()
         elif chosen == act_folder:
             subprocess.Popen(["explorer.exe", str(self.folder_path)])
         elif chosen == act_settings:
@@ -1036,13 +1161,15 @@ class AICapsuleBar(AuroraBaseWindow):
             self.contextActionTriggered.emit("toggle_visibility")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(AURORA_MIME_TYPE) or event.mimeData().hasUrls():
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
         drop_x = event.position().x()
-        if event.mimeData().hasFormat(AURORA_MIME_TYPE):
-            raw = bytes(event.mimeData().data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE):
+            raw = bytes(md.data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
             if "|" in raw:
                 src_grp, src_path_str = raw.split("|", 1)
                 src_path = Path(src_path_str)
@@ -1058,10 +1185,16 @@ class AICapsuleBar(AuroraBaseWindow):
                     self.itemMoveRequested.emit(src_path, self.group_key)
                     return
 
-        for url in event.mimeData().urls():
-            local = Path(url.toLocalFile())
-            if local.exists():
-                import_item_into_group_folder(local, self.folder_path)
+        imported_any = False
+        for url in md.urls():
+            local_str = url.toLocalFile()
+            if local_str:
+                local = Path(local_str)
+                if local.exists():
+                    import_item_into_group_folder(local, self.folder_path)
+                    imported_any = True
+        if not imported_any:
+            import_shell_idlist_drop(md, self.folder_path)
         self.reload_items()
 
     def paintEvent(self, event):
@@ -1418,6 +1551,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         menu.addSeparator()
         act_add = menu.addAction("➕ 添加应用 / 文件...")
         act_add_dir = menu.addAction("📁 添加文件夹...")
+        sys_menu = menu.addMenu("🖥️ 添加系统图标 (此电脑 / 回收站)")
+        sys_menu.setStyleSheet(MENU_QSS)
+        sys_actions = {sys_menu.addAction(v["label"]): k for k, v in SYSTEM_SHELL_ITEMS.items()}
         act_folder = menu.addAction(f"📂 打开此分区文件夹 ({self.folder_path.name})")
         menu.addSeparator()
         act_settings = menu.addAction("⚙️ 管理此分组 / 打开设置中心...")
@@ -1441,6 +1577,9 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         elif chosen == act_add_dir:
             if prompt_add_directory_to_folder(self, self.folder_path):
                 self.reload_items()
+        elif chosen in sys_actions:
+            if create_system_shell_shortcut(sys_actions[chosen], self.folder_path):
+                self.reload_items()
         elif chosen == act_folder:
             subprocess.Popen(["explorer.exe", str(self.folder_path)])
         elif chosen == act_settings:
@@ -1449,14 +1588,16 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
             self.contextActionTriggered.emit("toggle_visibility")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(AURORA_MIME_TYPE) or event.mimeData().hasUrls():
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
             self.expand_card()
             event.acceptProposedAction()
 
     def dropEvent(self, event):
         pos = event.position()
-        if event.mimeData().hasFormat(AURORA_MIME_TYPE):
-            raw = bytes(event.mimeData().data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE):
+            raw = bytes(md.data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
             if "|" in raw:
                 src_grp, src_path_str = raw.split("|", 1)
                 src_path = Path(src_path_str)
@@ -1474,10 +1615,16 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                     self.itemMoveRequested.emit(src_path, self.group_key)
                     return
 
-        for url in event.mimeData().urls():
-            local = Path(url.toLocalFile())
-            if local.exists():
-                import_item_into_group_folder(local, self.folder_path)
+        imported_any = False
+        for url in md.urls():
+            local_str = url.toLocalFile()
+            if local_str:
+                local = Path(local_str)
+                if local.exists():
+                    import_item_into_group_folder(local, self.folder_path)
+                    imported_any = True
+        if not imported_any:
+            import_shell_idlist_drop(md, self.folder_path)
         self.reload_items()
 
     def paintEvent(self, event):
