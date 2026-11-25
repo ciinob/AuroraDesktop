@@ -37,6 +37,8 @@ No bloated framework, no heavyweight background service — one exe does it all.
 ### 🔍 Aurora Spotlight (Global Search)
 From anywhere, **double-tap `Ctrl`** (or press `Alt + S`) to summon it instantly:
 
+![Aurora Spotlight: pinyin-initial & fuzzy matching](docs/images/spotlight-search.png)
+
 - **Pinyin-initial fuzzy matching**: type `wx` for WeChat, `wyy` for NetEase Cloud Music, `vsc` for VS Code
 - **Full coverage**: apps / PDFs / images / folders inside your capsules, plus everything in the Start Menu
 - **Instant calculator**: `128 * 4.5`, `sqrt(2)`, `sin(pi/4)` — press Enter to copy the result
