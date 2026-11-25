@@ -1404,22 +1404,36 @@ class AuroraSettingsWindow(QWidget):
         l_hk.addLayout(row_spot)
 
         self.rec_toggle, self.lbl_st_toggle, row_toggle = self._build_hotkey_row(
-            "一键隐藏 / 显示全部桌面卡片",
+            "一键隐藏 / 显示全部极光胶囊卡片",
             "快速淡出或唤回桌面上的所有极光胶囊与便签卡",
             on_change=lambda spec: self._apply_hotkey_change(toggle_cards=spec),
         )
         l_hk.addLayout(row_toggle)
 
+        self.rec_desk_icons, self.lbl_st_desk_icons, row_desk_icons = self._build_hotkey_row(
+            "✨ 一键接管纯净桌面（隐藏 / 恢复系统原生桌面图标）",
+            "按一下隐藏杂乱的 Windows 原生桌面图标，再按一下立即恢复原状",
+            on_change=lambda spec: self._apply_hotkey_change(toggle_desktop_icons=spec),
+        )
+        l_hk.addLayout(row_desk_icons)
+
+        self.rec_memo, self.lbl_st_memo, row_memo = self._build_hotkey_row(
+            "📝 打开 / 隐藏极光速记便签卡",
+            "随时呼出或收起桌面毛玻璃速记便签",
+            on_change=lambda spec: self._apply_hotkey_change(toggle_memo=spec),
+        )
+        l_hk.addLayout(row_memo)
+
         self.rec_settings, self.lbl_st_settings, row_settings = self._build_hotkey_row(
-            "打开极光设置中心",
-            "随时呼出本设置窗口（留空则仅通过托盘或右键菜单打开）",
+            "⚙️ 打开极光桌面主控台",
+            "随时呼出本设置主窗口",
             on_change=lambda spec: self._apply_hotkey_change(settings=spec),
         )
         l_hk.addLayout(row_settings)
 
         rst_row = QHBoxLayout()
         rst_row.addStretch(1)
-        b_rst_hk = QPushButton("↺ 恢复默认热键 (双击 Ctrl / Alt+S / Alt+~ / Alt+,)")
+        b_rst_hk = QPushButton("↺ 恢复全部默认热键 (双击 Ctrl / Alt+S / Alt+~ / Alt+. / Alt+M / Alt+,)")
         b_rst_hk.clicked.connect(self._on_reset_hotkeys)
         rst_row.addWidget(b_rst_hk)
         l_hk.addLayout(rst_row)
@@ -1459,11 +1473,15 @@ class AuroraSettingsWindow(QWidget):
         self.sw_double_ctrl.setChecked(bool(hk.get("double_ctrl_spotlight", True)))
         self.rec_spotlight.set_spec(hk.get("spotlight", ""))
         self.rec_toggle.set_spec(hk.get("toggle_cards", ""))
+        self.rec_desk_icons.set_spec(hk.get("toggle_desktop_icons", ""))
+        self.rec_memo.set_spec(hk.get("toggle_memo", ""))
         self.rec_settings.set_spec(hk.get("settings", ""))
 
         for key, spec_val, lbl in [
             ("spotlight", hk.get("spotlight", ""), self.lbl_st_spot),
             ("toggle_cards", hk.get("toggle_cards", ""), self.lbl_st_toggle),
+            ("toggle_desktop_icons", hk.get("toggle_desktop_icons", ""), self.lbl_st_desk_icons),
+            ("toggle_memo", hk.get("toggle_memo", ""), self.lbl_st_memo),
             ("settings", hk.get("settings", ""), self.lbl_st_settings),
         ]:
             if not spec_val:

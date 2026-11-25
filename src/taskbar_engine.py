@@ -4,6 +4,7 @@ import mmap
 import shutil
 import struct
 import subprocess
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -56,23 +57,11 @@ SHARED_MEM_NAME = "Local\\AuroraTaskbarSharedState_v1"
 PERSISTENT_TAP_DLL = DATA_ROOT / "cache" / "AuroraTaskbarTAP.dll"
 
 
-def apply_win32_taskbar_backdrop(mode_key: str):
-    """Set underlying Win32 Shell_TrayWnd & Shell_SecondaryTrayWnd backdrop so XAML transparency reveals wallpaper instead of black!"""
+def _set_tray_accent(state: int, flags: int = 0, color: int = 0):
     accent = ACCENT_POLICY()
-    if mode_key == "normal":
-        accent.AccentState = ACCENT_DISABLED
-        accent.AccentFlags = 0
-        accent.GradientColor = 0x00000000
-    elif mode_key == "max_frosted":
-        # Rich dark acrylic backdrop when a window is maximized so white web/doc windows never wash out taskbar icons!
-        accent.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
-        accent.AccentFlags = 2
-        accent.GradientColor = 0xB81E130B
-    else:
-        # ACCENT_ENABLE_TRANSPARENTGRADIENT (2) with flags=2 & color=0x00000000 makes Win32 tray 100% clear!
-        accent.AccentState = ACCENT_ENABLE_TRANSPARENTGRADIENT
-        accent.AccentFlags = 2
-        accent.GradientColor = 0x00000000
+    accent.AccentState = state
+    accent.AccentFlags = flags
+    accent.GradientColor = color
     accent.AnimationId = 0
 
     data = WINDOWCOMPOSITIONATTRIBDATA()
@@ -90,6 +79,23 @@ def apply_win32_taskbar_backdrop(mode_key: str):
         if not sec:
             break
         user32.SetWindowCompositionAttribute(sec, ctypes.byref(data))
+
+
+def apply_win32_taskbar_backdrop(mode_key: str, force_reset_blur: bool = False):
+    """Set underlying Win32 Shell_TrayWnd & Shell_SecondaryTrayWnd backdrop.
+
+    NOTE: Never use ACCENT_ENABLE_ACRYLICBLURBEHIND (4) on Shell_TrayWnd on Win11 24H2,
+    as DWM latches the acrylic brush and refuses to return to transparent gradient!
+    Instead, 'max_frosted' / 'normal' uses ACCENT_DISABLED (restoring Win11's native
+    dark Mica/Acrylic XAML taskbar), and 'clear' uses ACCENT_ENABLE_TRANSPARENTGRADIENT.
+    """
+    if mode_key in ("normal", "max_frosted"):
+        _set_tray_accent(ACCENT_DISABLED, 0, 0x00000000)
+    else:
+        if force_reset_blur:
+            # Clear any previously latched DWM acrylic state before applying transparent gradient
+            _set_tray_accent(ACCENT_DISABLED, 0, 0x00000000)
+        _set_tray_accent(ACCENT_ENABLE_TRANSPARENTGRADIENT, 2, 0x00000000)
 
 
 def import_existing_ttb_config() -> dict:
@@ -125,7 +131,7 @@ class TaskbarTransparencyEngine(QObject):
         self.cfg.setdefault("max_win_acrylic", True)
         self._own_hwnds_provider = own_hwnds_provider or (lambda: set())
 
-        self._version = 1
+        self._version = (int(time.time() * 1000) & 0x7FFFFFFF) or 1
         self._shm: mmap.mmap | None = None
         self._injected_pid = 0
         self._maximized_active = False
@@ -133,7 +139,7 @@ class TaskbarTransparencyEngine(QObject):
         self._ensure_persistent_tap_dll()
         self._init_shared_memory()
         self._maximized_active = self._detect_maximized_state()
-        self.apply_all()
+        self.apply_all(force_reset_blur=True)
 
         # Maintain Win32 backdrop + re-attach TAP DLL if Explorer restarts
         self._guard_timer = QTimer(self)
@@ -166,7 +172,7 @@ class TaskbarTransparencyEngine(QObject):
         now_max = self._detect_maximized_state()
         if now_max != self._maximized_active:
             self._maximized_active = now_max
-            apply_win32_taskbar_backdrop(self._effective_mode_key())
+            apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=(not now_max))
             self._write_shared_state()
 
     def _ensure_persistent_tap_dll(self):
@@ -208,7 +214,7 @@ class TaskbarTransparencyEngine(QObject):
         if not enabled:
             mode_int = 3  # System default
         elif mode_key != "normal" and self.cfg.get("max_win_acrylic", False) and self._maximized_active:
-            mode_int = 2  # Deep Aurora Glass (0.68) for crisp contrast against maximized windows
+            mode_int = 3  # Restore native Win11 dark frosted Mica/Acrylic taskbar when window is maximized
         show_line = 1 if self.cfg.get("show_line", False) else 0
 
         self._shm.seek(0)
@@ -257,9 +263,9 @@ class TaskbarTransparencyEngine(QObject):
             self._write_shared_state()
             self._inject_tap_into_explorer()
 
-    def apply_all(self):
+    def apply_all(self, force_reset_blur: bool = True):
         self._maximized_active = self._detect_maximized_state()
-        apply_win32_taskbar_backdrop(self._effective_mode_key())
+        apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=force_reset_blur)
         self._write_shared_state()
         if self.cfg.get("enabled", True):
             self._inject_tap_into_explorer()

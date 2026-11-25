@@ -66,6 +66,8 @@ from win32_utils import (
 HOTKEY_ID_TOGGLE = 0xA001
 HOTKEY_ID_SPOTLIGHT = 0xA002
 HOTKEY_ID_SETTINGS = 0xA003
+HOTKEY_ID_DESKTOP_ICONS = 0xA004
+HOTKEY_ID_MEMO = 0xA005
 AUTORUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 STARTUP_APPROVED_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 AUTORUN_KEY_NAME = "AuroraDesktop"
@@ -75,6 +77,8 @@ DEFAULT_HOTKEYS = {
     "double_ctrl_spotlight": True,
     "spotlight": "Alt+S",
     "toggle_cards": "Alt+~",
+    "toggle_desktop_icons": "Alt+.",
+    "toggle_memo": "Alt+M",
     "settings": "Alt+,",
 }
 
@@ -89,18 +93,36 @@ DEFAULT_PARTITIONS = [
 class HotkeyReceiver(QWidget):
     """Hidden Win32 message receiver for configurable global hotkeys, single-instance wakeup, and Explorer restarts."""
 
-    def __init__(self, on_toggle_vis, on_spotlight, on_open_settings, on_force_show, on_explorer_restarted):
+    def __init__(
+        self,
+        on_toggle_vis,
+        on_spotlight,
+        on_open_settings,
+        on_toggle_desktop_icons,
+        on_toggle_memo,
+        on_force_show,
+        on_explorer_restarted,
+    ):
         super().__init__()
         self._on_toggle_vis = on_toggle_vis
         self._on_spotlight = on_spotlight
         self._on_open_settings = on_open_settings
+        self._on_toggle_desktop_icons = on_toggle_desktop_icons
+        self._on_toggle_memo = on_toggle_memo
         self._on_force_show = on_force_show
         self._on_explorer_restarted = on_explorer_restarted
         self._registered_ids: set[int] = set()
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.resize(1, 1)
 
-    def apply_hotkeys(self, toggle_spec: str, spotlight_spec: str, settings_spec: str) -> dict[str, bool]:
+    def apply_hotkeys(
+        self,
+        toggle_spec: str,
+        spotlight_spec: str,
+        settings_spec: str,
+        desktop_icons_spec: str = "",
+        memo_spec: str = "",
+    ) -> dict[str, bool]:
         hwnd = int(self.winId())
         for hk_id in list(self._registered_ids):
             user32.UnregisterHotKey(hwnd, hk_id)
@@ -111,6 +133,8 @@ class HotkeyReceiver(QWidget):
             ("toggle_cards", HOTKEY_ID_TOGGLE, toggle_spec),
             ("spotlight", HOTKEY_ID_SPOTLIGHT, spotlight_spec),
             ("settings", HOTKEY_ID_SETTINGS, settings_spec),
+            ("toggle_desktop_icons", HOTKEY_ID_DESKTOP_ICONS, desktop_icons_spec),
+            ("toggle_memo", HOTKEY_ID_MEMO, memo_spec),
         ]:
             if not spec or not spec.strip():
                 results[slot] = True
@@ -138,6 +162,12 @@ class HotkeyReceiver(QWidget):
                     return True, 0
                 if msg.wParam == HOTKEY_ID_SETTINGS:
                     self._on_open_settings()
+                    return True, 0
+                if msg.wParam == HOTKEY_ID_DESKTOP_ICONS:
+                    self._on_toggle_desktop_icons()
+                    return True, 0
+                if msg.wParam == HOTKEY_ID_MEMO:
+                    self._on_toggle_memo()
                     return True, 0
             elif WM_AURORA_OPEN_PANEL and msg.message == WM_AURORA_OPEN_PANEL:
                 self._on_open_settings()
@@ -290,6 +320,8 @@ class AuroraController(QObject):
             self.toggle_all_visibility,
             self.spotlight.toggle_spotlight,
             lambda: self.open_settings("general"),
+            self.toggle_hide_desktop_icons,
+            self.toggle_memo_card,
             self.force_show_and_showcase,
             self._on_explorer_restarted,
         )
@@ -297,6 +329,8 @@ class AuroraController(QObject):
             self.hotkeys_cfg.get("toggle_cards", ""),
             self.hotkeys_cfg.get("spotlight", ""),
             self.hotkeys_cfg.get("settings", ""),
+            self.hotkeys_cfg.get("toggle_desktop_icons", ""),
+            self.hotkeys_cfg.get("toggle_memo", ""),
         )
 
         # Periodic light z-order guard + cold-boot shell readiness re-pin
@@ -915,8 +949,12 @@ class AuroraController(QObject):
         hide = bool(hide)
         self.hide_desktop_icons = hide
         set_system_desktop_icons_visible(not hide)
+        self._refresh_tray_labels()
         self._save_config()
         self.stateChanged.emit()
+
+    def toggle_hide_desktop_icons(self):
+        self.set_hide_desktop_icons(not self.are_desktop_icons_hidden())
 
     def open_data_root(self):
         subprocess.Popen(["explorer.exe", str(DATA_ROOT)])
@@ -999,6 +1037,8 @@ class AuroraController(QObject):
         double_ctrl_spotlight: bool | None = None,
         spotlight: str | None = None,
         toggle_cards: str | None = None,
+        toggle_desktop_icons: str | None = None,
+        toggle_memo: str | None = None,
         settings: str | None = None,
     ) -> dict[str, bool]:
         if double_ctrl_spotlight is not None:
@@ -1011,6 +1051,10 @@ class AuroraController(QObject):
             self.hotkeys_cfg["spotlight"] = spotlight.strip()
         if toggle_cards is not None:
             self.hotkeys_cfg["toggle_cards"] = toggle_cards.strip()
+        if toggle_desktop_icons is not None:
+            self.hotkeys_cfg["toggle_desktop_icons"] = toggle_desktop_icons.strip()
+        if toggle_memo is not None:
+            self.hotkeys_cfg["toggle_memo"] = toggle_memo.strip()
         if settings is not None:
             self.hotkeys_cfg["settings"] = settings.strip()
 
@@ -1018,6 +1062,8 @@ class AuroraController(QObject):
             self.hotkeys_cfg.get("toggle_cards", ""),
             self.hotkeys_cfg.get("spotlight", ""),
             self.hotkeys_cfg.get("settings", ""),
+            self.hotkeys_cfg.get("toggle_desktop_icons", ""),
+            self.hotkeys_cfg.get("toggle_memo", ""),
         )
         self._refresh_tray_labels()
         self._save_config()
@@ -1028,6 +1074,8 @@ class AuroraController(QObject):
             double_ctrl_spotlight=DEFAULT_HOTKEYS["double_ctrl_spotlight"],
             spotlight=DEFAULT_HOTKEYS["spotlight"],
             toggle_cards=DEFAULT_HOTKEYS["toggle_cards"],
+            toggle_desktop_icons=DEFAULT_HOTKEYS["toggle_desktop_icons"],
+            toggle_memo=DEFAULT_HOTKEYS["toggle_memo"],
             settings=DEFAULT_HOTKEYS["settings"],
         )
 
@@ -1270,6 +1318,11 @@ class AuroraController(QObject):
 
         menu.addSeparator()
 
+        self.act_desk_icons = menu.addAction("✨ 接管纯净桌面 (隐藏系统图标)")
+        self.act_desk_icons.setCheckable(True)
+        self.act_desk_icons.setChecked(self.are_desktop_icons_hidden())
+        self.act_desk_icons.triggered.connect(self.set_hide_desktop_icons)
+
         self.act_memo_tray = menu.addAction("📝 极光速记便签")
         self.act_memo_tray.setCheckable(True)
         self.act_memo_tray.setChecked(self.show_memo)
@@ -1304,8 +1357,21 @@ class AuroraController(QObject):
         tog_hk = self.hotkeys_cfg.get("toggle_cards", "")
         tog_suffix = f" ({format_hotkey_label(tog_hk)})" if tog_hk else ""
 
+        desk_hk = self.hotkeys_cfg.get("toggle_desktop_icons", "")
+        desk_suffix = f" ({format_hotkey_label(desk_hk)})" if desk_hk else ""
+
+        memo_hk = self.hotkeys_cfg.get("toggle_memo", "")
+        memo_suffix = f" ({format_hotkey_label(memo_hk)})" if memo_hk else ""
+
         if hasattr(self, "act_spot"):
             self.act_spot.setText(f"🔍 极光全局搜索{spot_suffix}")
+        if hasattr(self, "act_desk_icons"):
+            self.act_desk_icons.blockSignals(True)
+            self.act_desk_icons.setChecked(self.are_desktop_icons_hidden())
+            self.act_desk_icons.setText(f"✨ 接管纯净桌面 (隐藏系统图标){desk_suffix}")
+            self.act_desk_icons.blockSignals(False)
+        if hasattr(self, "act_memo_tray"):
+            self.act_memo_tray.setText(f"📝 极光速记便签{memo_suffix}")
         if hasattr(self, "act_vis"):
             verb = "🙈 隐藏全部桌面卡片" if self.visible_state else "✨ 显示全部桌面卡片"
             self.act_vis.setText(f"{verb}{tog_suffix}")

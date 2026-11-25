@@ -16,11 +16,21 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 # Constants
+GWL_STYLE = -16
 GWL_EXSTYLE = -20
 GWLP_HWNDPARENT = -8
 
+WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
+WS_THICKFRAME = 0x00040000
+
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
+WS_EX_LAYERED = 0x00080000
+LWA_ALPHA = 0x00000002
+GW_OWNER = 4
+MONITOR_DEFAULTTONEAREST = 2
+MONITORINFOF_PRIMARY = 1
 
 HWND_BOTTOM = wintypes.HWND(1)
 SWP_NOSIZE = 0x0001
@@ -222,6 +232,15 @@ class MSLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 # Configure ctypes signatures properly for 64-bit Windows
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
@@ -290,6 +309,29 @@ user32.IsIconic.restype = wintypes.BOOL
 
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
+
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+
+user32.GetLayeredWindowAttributes.argtypes = [
+    wintypes.HWND,
+    ctypes.POINTER(wintypes.COLORREF),
+    ctypes.POINTER(wintypes.BYTE),
+    ctypes.POINTER(wintypes.DWORD),
+]
+user32.GetLayeredWindowAttributes.restype = wintypes.BOOL
+
+user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+user32.MonitorFromWindow.restype = wintypes.HMONITOR
+
+user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
 
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
 user32.SetWindowsHookExW.restype = wintypes.HHOOK
@@ -412,30 +454,68 @@ _IGNORED_MAX_CLASSES = {
     "Shell_SecondaryTrayWnd",
     "Windows.UI.Core.CoreWindow",
     "XamlExplorerHostIslandWindow",
+    "CEF-OSC-WIDGET",
+    "DummyDWMListenerWindow",
+    "EdgeUiInputTopWndClass",
+    "RainmeterMeterWindow",
 }
 
 
 def has_maximized_app_window(own_hwnds: set[int] | None = None) -> bool:
-    """Return True if any real, visible, uncloaked application window is currently maximized."""
+    """Return True only when a real, visible, uncloaked app window is maximized IN FRONT OF the desktop.
+
+    Walks top-to-bottom Z-order via EnumWindows and stops immediately upon reaching the
+    Desktop Shell Host (Progman/WorkerW), so pressing Win+D (Show Desktop) immediately
+    returns False and restores a crystal-clear taskbar. Also filters out gaming/recording
+    overlays (e.g. NVIDIA GeForce Overlay), transparent layered hosts, and cloaked UWP apps.
+    """
     skip = own_hwnds or set()
+    host_hwnd, defview_hwnd, listview_hwnd = find_desktop_shell_host()
+    desktop_barrier = {h for h in (host_hwnd, defview_hwnd, listview_hwnd) if h}
     found = False
 
     def _enum_cb(hwnd, _lparam):
         nonlocal found
-        if not hwnd or hwnd in skip:
+        if not hwnd:
+            return True
+        # Z-order barrier: anything below the desktop wallpaper/icon host is hidden behind Win+D!
+        if hwnd in desktop_barrier:
+            return False
+        if hwnd in skip:
             return True
         if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd) or not user32.IsZoomed(hwnd):
-            return True
-
-        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        if (ex & WS_EX_TOOLWINDOW) and not (ex & WS_EX_APPWINDOW):
-            return True
-        if (ex & WS_EX_TRANSPARENT) and (ex & WS_EX_NOACTIVATE):
             return True
 
         cls = get_window_class(hwnd)
         if not cls or cls in _IGNORED_MAX_CLASSES:
             return True
+
+        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        if (ex & WS_EX_TOOLWINDOW) and not (ex & WS_EX_APPWINDOW):
+            return True
+        if (ex & WS_EX_NOACTIVATE) or (ex & WS_EX_TRANSPARENT):
+            return True
+
+        # Skip owned popup/helper windows that aren't explicit taskbar app windows
+        if user32.GetWindow(hwnd, GW_OWNER) and not (ex & WS_EX_APPWINDOW):
+            return True
+
+        # Real maximized app windows carry standard frame/menu styles; raw popup overlays do not
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        if (style & (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) == 0:
+            return True
+
+        if user32.GetWindowTextLengthW(hwnd) <= 0:
+            return True
+
+        # Skip transparent/invisible WS_EX_LAYERED windows
+        if ex & WS_EX_LAYERED:
+            cr = wintypes.COLORREF(0)
+            alpha = wintypes.BYTE(255)
+            lwa_flags = wintypes.DWORD(0)
+            if user32.GetLayeredWindowAttributes(hwnd, ctypes.byref(cr), ctypes.byref(alpha), ctypes.byref(lwa_flags)):
+                if (lwa_flags.value & LWA_ALPHA) and alpha.value < 120:
+                    return True
 
         cloaked = ctypes.c_int(0)
         hr = dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
@@ -444,11 +524,20 @@ def has_maximized_app_window(own_hwnds: set[int] | None = None) -> bool:
 
         rc = wintypes.RECT()
         if user32.GetWindowRect(hwnd, ctypes.byref(rc)):
-            if (rc.right - rc.left) < 500 or (rc.bottom - rc.top) < 350:
+            if (rc.right - rc.left) < 600 or (rc.bottom - rc.top) < 400:
                 return True
 
+        # Check primary monitor so maximized apps on secondary screens don't darken a clean primary desktop
+        hmon = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if hmon:
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                if not (mi.dwFlags & MONITORINFOF_PRIMARY):
+                    return True
+
         found = True
-        return False  # Stop enumeration immediately on first match
+        return False
 
     cb = WNDENUMPROC(_enum_cb)
     user32.EnumWindows(cb, 0)
