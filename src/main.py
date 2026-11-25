@@ -146,6 +146,9 @@ class AuroraController(QObject):
                 "Inter-Regular.ttf",
                 "Inter-Medium.ttf",
                 "Inter-SemiBold.ttf",
+                "Outfit-ExtraLight.ttf",
+                "Outfit-Light.ttf",
+                "Cormorant-Light.ttf",
                 "Ruthligos.ttf",
                 "GeosansLight.ttf",
             ):
@@ -155,17 +158,17 @@ class AuroraController(QObject):
         self.header_font_family = "Inter"
         self.icon_loader = ShortcutIconLoader()
 
-        # 1. Native Desktop Clock (Fused & Synced from Rainmeter Welfare\Clock!)
+        # 1. Native Desktop Clock (Luxury Nordic / Editorial / Sonoma minimalist clock)
         default_clock_cfg = {
             "enabled": True,
-            "style": "aurora_signature",
+            "style": "nordic_modern",
             "use_24h": True,
             "show_seconds": False,
             "scale": 1.0,
             "locked": False,
             "click_through": False,
-            "x": 2076,
-            "y": 2,
+            "x": 2172,
+            "y": 20,
         }
         self.clock_cfg: dict = {**default_clock_cfg, **self.config.get("clock", {})}
         self.clock_widget = AuroraClockWidget(

@@ -1,6 +1,17 @@
 from datetime import datetime
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import (
+    QActionGroup,
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import QMenu, QWidget
 
 from widgets import MENU_QSS, make_apple_font
@@ -23,24 +34,27 @@ WS_EX_LAYERED = 0x00080000
 WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 CLOCK_STYLES = {
-    "aurora_signature": "✨ 极光艺术签名风 (Ruthligos 手写星期 + 果味数字)",
-    "rainmeter_classic": "🕰️ Rainmeter 原版复刻 (Ruthligos + GeosansLight)",
-    "apple_sonoma": "🍎 macOS 锁屏极简风 (纯正果味大字 + 中文日期)",
+    "nordic_modern": "✨ 极光纤雅几何风 (Nordic Outfit · 默认推荐)",
+    "editorial_serif": "🏛️ 高定古典衬线风 (Apple Editorial · Cormorant)",
+    "apple_sonoma": "🍎 macOS 锁屏中文风 (果味极简排版)",
+    "script_layered": "✍️ 手写艺术分层风 (无遮挡上下分层)",
 }
 
 
 class AuroraClockWidget(QWidget):
-    """Native desktop-pinned minimalist white clock replacing Rainmeter Welfare\\Clock.
-    Stays visible even when organizer cards are hidden ('只留纯粹壁纸与时钟').
+    """Refined luxury minimalist desktop clock (Outfit ExtraLight / Cormorant Editorial / Sonoma).
+    Uses optically-centered glowing twin-dot colon and silk-white gradient numerals.
     """
     configChanged = Signal()
 
-    BASE_W = 480
-    BASE_H = 215
+    BASE_W = 360
+    BASE_H = 165
 
     def __init__(self, clock_cfg: dict, theme_provider=None, parent=None):
         super().__init__(parent)
         self.cfg = clock_cfg
+        if self.cfg.get("style") not in CLOCK_STYLES:
+            self.cfg["style"] = "nordic_modern"
         self._theme_provider = theme_provider or (lambda: (QColor("#2dd4bf"), QColor("#38bdf8"), QColor("#a855f7")))
         self._dragging = False
         self._drag_offset = QPoint()
@@ -51,7 +65,6 @@ class AuroraClockWidget(QWidget):
 
         self._apply_size_and_pos()
 
-        # Refresh every 500ms so minute/second transition is exact with ~0.00% CPU usage
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(500)
         self._tick_timer.timeout.connect(self.update)
@@ -68,12 +81,11 @@ class AuroraClockWidget(QWidget):
 
         x = self.cfg.get("x")
         y = self.cfg.get("y")
-        if x is None or y is None:
-            # Synced from Rainmeter Welfare\Clock: top-right of primary screen (rect 2133..2560, y=0)
-            screen = QGuiApplication.primaryScreen()
-            geom = screen.geometry() if screen else QRectF(0, 0, 2560, 1440)
-            x = int(geom.right() - w - 12)
-            y = int(geom.top() + 4)
+        screen = QGuiApplication.primaryScreen()
+        geom = screen.geometry() if screen else QRectF(0, 0, 2560, 1440)
+        if x is None or y is None or int(x) + w > geom.right() + 20:
+            x = int(geom.right() - w - 28)
+            y = int(geom.top() + 22)
             self.cfg["x"] = x
             self.cfg["y"] = y
         self.move(int(x), int(y))
@@ -122,16 +134,13 @@ class AuroraClockWidget(QWidget):
     def mouseMoveEvent(self, event):
         if self._dragging and (event.buttons() & Qt.LeftButton):
             new_pt = event.globalPosition().toPoint() - self._drag_offset
-            # Snap to screen edges within 14px (matches Rainmeter SnapEdges=1 & KeepOnScreen=1)
             screen = QGuiApplication.screenAt(event.globalPosition().toPoint()) or QGuiApplication.primaryScreen()
             if screen:
                 sg = screen.geometry()
-                if abs(new_pt.x() - sg.left()) <= 14:
-                    new_pt.setX(sg.left())
-                elif abs((new_pt.x() + self.width()) - (sg.right() + 1)) <= 14:
-                    new_pt.setX(sg.right() + 1 - self.width())
-                if abs(new_pt.y() - sg.top()) <= 14:
-                    new_pt.setY(sg.top())
+                if abs((new_pt.x() + self.width()) - (sg.right() - 24)) <= 14:
+                    new_pt.setX(sg.right() - 24 - self.width())
+                if abs(new_pt.y() - (sg.top() + 22)) <= 14:
+                    new_pt.setY(sg.top() + 22)
             self.move(new_pt)
         super().mouseMoveEvent(event)
 
@@ -153,9 +162,9 @@ class AuroraClockWidget(QWidget):
         act_vis.toggled.connect(self._set_enabled)
 
         menu.addSeparator()
-        style_menu = menu.addMenu("🎨 时钟视觉风格")
+        style_menu = menu.addMenu("🎨 时钟高定字体风格")
         style_menu.setStyleSheet(MENU_QSS)
-        cur_style = self.cfg.get("style", "aurora_signature")
+        cur_style = self.cfg.get("style", "nordic_modern")
         grp_s = QActionGroup(menu)
         for s_key, s_label in CLOCK_STYLES.items():
             a = style_menu.addAction(s_label)
@@ -168,7 +177,7 @@ class AuroraClockWidget(QWidget):
         scale_menu.setStyleSheet(MENU_QSS)
         cur_sc = round(float(self.cfg.get("scale", 1.0)), 2)
         grp_sc = QActionGroup(menu)
-        for sc_val, sc_lbl in [(0.85, "紧凑 (85%)"), (1.0, "标准原版尺寸 (100%)"), (1.15, "舒展 (115%)"), (1.30, "大屏醒目 (130%)")]:
+        for sc_val, sc_lbl in [(0.85, "精致小巧 (85%)"), (1.0, "黄金标准 (100%)"), (1.15, "舒展大气 (115%)"), (1.30, "巨幕醒目 (130%)")]:
             a = scale_menu.addAction(sc_lbl)
             a.setCheckable(True)
             a.setChecked(abs(cur_sc - sc_val) < 0.03)
@@ -246,85 +255,172 @@ class AuroraClockWidget(QWidget):
         self._apply_size_and_pos()
         self.configChanged.emit()
 
+    def _draw_optical_time(
+        self,
+        painter: QPainter,
+        hh: str,
+        mm: str,
+        ss: str,
+        font: QFont,
+        center_x: float,
+        baseline_y: float,
+        sc: float,
+    ):
+        """Draw HH and MM separated by optically-centered twin circular dots + silk-white vertical gradient."""
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        cap_h = fm.capHeight()
+        colon_gap = 22.0 * sc
+
+        w_hh = fm.horizontalAdvance(hh)
+        w_mm = fm.horizontalAdvance(mm)
+
+        sec_font = make_apple_font(int(round(20 * sc)), QFont.Light, 0.5)
+        fm_sec = QFontMetrics(sec_font)
+        w_ss = (fm_sec.horizontalAdvance(ss) + 8.0 * sc) if ss else 0.0
+
+        total_w = w_hh + colon_gap + w_mm + w_ss
+        start_x = center_x - total_w / 2.0
+
+        path = QPainterPath()
+        path.addText(QPointF(start_x, baseline_y), font, hh)
+        mm_x = start_x + w_hh + colon_gap
+        path.addText(QPointF(mm_x, baseline_y), font, mm)
+        if ss:
+            path.addText(QPointF(mm_x + w_mm + 8.0 * sc, baseline_y - 2.0 * sc), sec_font, ss)
+
+        # Optically centered twin circular dots for ':'
+        dot_cx = start_x + w_hh + colon_gap / 2.0
+        mid_y = baseline_y - cap_h * 0.48
+        dot_r = 2.5 * sc
+        dot_sep = cap_h * 0.21
+        path.addEllipse(QPointF(dot_cx, mid_y - dot_sep), dot_r, dot_r)
+        path.addEllipse(QPointF(dot_cx, mid_y + dot_sep), dot_r, dot_r)
+
+        # Soft subtle drop shadow
+        painter.save()
+        painter.translate(0.0, 2.0 * sc)
+        painter.fillPath(path, QColor(0, 0, 0, 72))
+        painter.restore()
+
+        # Silk-white to ice-mist vertical gradient fill
+        grad = QLinearGradient(0.0, baseline_y - cap_h, 0.0, baseline_y + 4.0)
+        grad.setColorAt(0.0, QColor(255, 255, 255, 252))
+        grad.setColorAt(1.0, QColor(232, 242, 255, 222))
+        painter.fillPath(path, QBrush(grad))
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
 
-        # Keep micro-alpha 1/255 hit region when unlocked & non-click-through so dragging anywhere on clock works smoothly
         if not self.cfg.get("click_through", False):
             painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
 
         now = datetime.now()
         sc = self._scale()
         w, h = float(self.width()), float(self.height())
-        style = self.cfg.get("style", "aurora_signature")
+        cx = w / 2.0
+        style = self.cfg.get("style", "nordic_modern")
         use_24h = bool(self.cfg.get("use_24h", True))
         show_sec = bool(self.cfg.get("show_seconds", False))
 
-        sec_fmt = ":%S" if show_sec else ""
-        if use_24h:
-            time_str = now.strftime(f"%H:%M{sec_fmt}")
-            ampm_str = ""
-        else:
-            time_str = now.strftime(f"%I:%M{sec_fmt}").lstrip("0") or "12:00"
-            ampm_str = now.strftime(" %p")
+        hh = now.strftime("%H") if use_24h else (now.strftime("%I").lstrip("0") or "12")
+        mm = now.strftime("%M")
+        ss = now.strftime("%S") if show_sec else ("" if use_24h else now.strftime("%p"))
 
-        weekday_en = now.strftime("%A")
-        date_en = f"{now.day:02d} {now.strftime('%B')}"
-        date_cn = f"{now.month}月{now.day}日  {WEEKDAY_CN[now.weekday()]}"
+        weekday_upper = now.strftime("%A").upper()
+        date_upper = f"{weekday_upper}  ·  {now.strftime('%b').upper()} {now.day:02d}"
+        date_cn = f"{now.month}月{now.day}日  ·  {WEEKDAY_CN[now.weekday()]}"
+        c1, _, c2 = self._theme_provider()
 
-        if style == "apple_sonoma":
-            # Pure Apple macOS Sonoma Lock Screen Clock
-            t_font = make_apple_font(int(round(62 * sc)), QFont.DemiBold, -1.2)
-            painter.setFont(t_font)
-            t_rect = QRectF(0.0, 22.0 * sc, w, 74.0 * sc)
-            painter.setPen(QColor(0, 0, 0, 105))
-            painter.drawText(t_rect.translated(0, 2.0), Qt.AlignHCenter | Qt.AlignVCenter, time_str + ampm_str)
-            painter.setPen(QColor(255, 255, 255, 248))
-            painter.drawText(t_rect, Qt.AlignHCenter | Qt.AlignVCenter, time_str + ampm_str)
+        if style == "editorial_serif":
+            # Luxury Editorial Serif (Apple iOS Classic Serif Lock Screen aesthetic)
+            t_font = QFont("Cormorant Garamond Light")
+            t_font.setPixelSize(int(round(86 * sc)))
+            t_font.setWeight(QFont.Light)
+            t_font.setStyleStrategy(QFont.PreferAntialias)
+            self._draw_optical_time(painter, hh, mm, ss, t_font, cx, 84.0 * sc, sc)
 
-            d_font = make_apple_font(int(round(17 * sc)), QFont.Medium, 0.8)
+            # Delicate aurora hairline divider
+            line_grad = QLinearGradient(cx - 48 * sc, 0, cx + 48 * sc, 0)
+            line_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+            lc = QColor(c1); lc.setAlpha(135)
+            line_grad.setColorAt(0.5, lc)
+            line_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setPen(QPen(line_grad, 1.0))
+            painter.drawLine(QPointF(cx - 48 * sc, 99.0 * sc), QPointF(cx + 48 * sc, 99.0 * sc))
+
+            d_font = make_apple_font(int(round(12 * sc)), QFont.Medium, 2.8 * sc)
             painter.setFont(d_font)
-            d_rect = QRectF(0.0, 98.0 * sc, w, 30.0 * sc)
-            painter.setPen(QColor(0, 0, 0, 95))
-            painter.drawText(d_rect.translated(0, 1.5), Qt.AlignHCenter | Qt.AlignVCenter, date_cn)
-            painter.setPen(QColor(245, 250, 255, 225))
-            painter.drawText(d_rect, Qt.AlignHCenter | Qt.AlignVCenter, date_cn)
+            d_rect = QRectF(0.0, 108.0 * sc, w, 26.0 * sc)
+            painter.setPen(QColor(0, 0, 0, 75))
+            painter.drawText(d_rect.translated(0, 1.0), Qt.AlignHCenter | Qt.AlignVCenter, date_upper)
+            painter.setPen(QColor(242, 248, 255, 215))
+            painter.drawText(d_rect, Qt.AlignHCenter | Qt.AlignVCenter, date_upper)
             return
 
-        # 1. Background Ruthligos Script Weekday Watermark (Synced 1:1 with Welfare\Clock [MeterDay], unclipped!)
-        script_font = QFont("Ruthligos")
-        script_font.setPixelSize(int(round(62 * sc)))
-        script_font.setStyleStrategy(QFont.PreferAntialias)
-        painter.setFont(script_font)
-        day_rect = QRectF(0.0, 8.0 * sc, w, h - 10.0 * sc)
-        painter.setPen(QColor(255, 255, 255, 92))
-        painter.drawText(day_rect, Qt.AlignHCenter | Qt.AlignTop | Qt.TextDontClip, weekday_en)
+        if style == "apple_sonoma":
+            # macOS Sonoma Lock Screen: Chinese Eyebrow Date ABOVE sleek rounded numerals
+            d_font = make_apple_font(int(round(14 * sc)), QFont.Medium, 1.2 * sc)
+            painter.setFont(d_font)
+            d_rect = QRectF(0.0, 12.0 * sc, w, 26.0 * sc)
+            painter.setPen(QColor(0, 0, 0, 80))
+            painter.drawText(d_rect.translated(0, 1.0), Qt.AlignHCenter | Qt.AlignVCenter, date_cn)
+            painter.setPen(QColor(245, 250, 255, 222))
+            painter.drawText(d_rect, Qt.AlignHCenter | Qt.AlignVCenter, date_cn)
 
-        # 2. Foreground Time ([Meter24hTime] / [Meter12hTime])
-        if style == "rainmeter_classic":
-            time_font = QFont("GeosansLight")
-            time_font.setPixelSize(int(round(52 * sc)))
-            time_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.8 * sc)
-            date_font = QFont("GeosansLight")
-            date_font.setPixelSize(int(round(25 * sc)))
-            date_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.4 * sc)
-        else:
-            # aurora_signature: Ruthligos calligraphic background + crisp Apple SF Pro (Inter) numbers!
-            time_font = make_apple_font(int(round(52 * sc)), QFont.Light, 1.6 * sc)
-            date_font = make_apple_font(int(round(20 * sc)), QFont.Normal, 1.4 * sc)
+            t_font = QFont("Outfit Thin")
+            t_font.setPixelSize(int(round(74 * sc)))
+            t_font.setWeight(QFont.Light)
+            t_font.setStyleStrategy(QFont.PreferAntialias)
+            self._draw_optical_time(painter, hh, mm, ss, t_font, cx, 106.0 * sc, sc)
+            return
 
-        painter.setFont(time_font)
-        time_rect = QRectF(0.0, 52.0 * sc, w, 64.0 * sc)
-        painter.setPen(QColor(0, 0, 0, 95))
-        painter.drawText(time_rect.translated(0, 1.5), Qt.AlignHCenter | Qt.AlignVCenter, time_str + ampm_str)
-        painter.setPen(QColor(255, 255, 255, 252))
-        painter.drawText(time_rect, Qt.AlignHCenter | Qt.AlignVCenter, time_str + ampm_str)
+        if style == "script_layered":
+            # Cleanly separated Ruthligos Script Weekday ABOVE Outfit ExtraLight Time (zero overlap!)
+            s_font = QFont("Ruthligos")
+            s_font.setPixelSize(int(round(44 * sc)))
+            s_font.setStyleStrategy(QFont.PreferAntialias)
+            painter.setFont(s_font)
+            s_rect = QRectF(0.0, 2.0 * sc, w, 58.0 * sc)
+            painter.setPen(QColor(255, 255, 255, 165))
+            painter.drawText(s_rect, Qt.AlignHCenter | Qt.AlignTop | Qt.TextDontClip, now.strftime("%A"))
 
-        # 3. Date below Time ([MeterDate]: "%d %B", e.g. "25 November")
-        painter.setFont(date_font)
-        date_rect = QRectF(0.0, 112.0 * sc, w, 36.0 * sc)
-        painter.setPen(QColor(0, 0, 0, 85))
-        painter.drawText(date_rect.translated(0, 1.0), Qt.AlignHCenter | Qt.AlignVCenter, date_en)
-        painter.setPen(QColor(255, 255, 255, 236))
-        painter.drawText(date_rect, Qt.AlignHCenter | Qt.AlignVCenter, date_en)
+            t_font = QFont("Outfit Thin")
+            t_font.setPixelSize(int(round(64 * sc)))
+            t_font.setWeight(QFont.ExtraLight)
+            t_font.setStyleStrategy(QFont.PreferAntialias)
+            self._draw_optical_time(painter, hh, mm, ss, t_font, cx, 114.0 * sc, sc)
+
+            d_font = make_apple_font(int(round(12 * sc)), QFont.Normal, 2.2 * sc)
+            painter.setFont(d_font)
+            d_rect = QRectF(0.0, 124.0 * sc, w, 24.0 * sc)
+            painter.setPen(QColor(235, 245, 255, 195))
+            painter.drawText(d_rect, Qt.AlignHCenter | Qt.AlignVCenter, f"{now.day:02d} {now.strftime('%B').upper()}")
+            return
+
+        # Default: nordic_modern (Outfit ExtraLight sculptural numerals + Aurora whisper divider + airy tracked date)
+        t_font = QFont("Outfit Thin")
+        t_font.setPixelSize(int(round(76 * sc)))
+        t_font.setWeight(QFont.ExtraLight)
+        t_font.setStyleStrategy(QFont.PreferAntialias)
+        self._draw_optical_time(painter, hh, mm, ss, t_font, cx, 82.0 * sc, sc)
+
+        # Whisper-thin glowing aurora divider line
+        line_grad = QLinearGradient(cx - 44 * sc, 0, cx + 44 * sc, 0)
+        line_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        lc1 = QColor(c1); lc1.setAlpha(150)
+        lc2 = QColor(c2); lc2.setAlpha(150)
+        line_grad.setColorAt(0.35, lc1)
+        line_grad.setColorAt(0.65, lc2)
+        line_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setPen(QPen(line_grad, 1.0))
+        painter.drawLine(QPointF(cx - 44 * sc, 97.0 * sc), QPointF(cx + 44 * sc, 97.0 * sc))
+
+        d_font = make_apple_font(int(round(12 * sc)), QFont.Medium, 2.6 * sc)
+        painter.setFont(d_font)
+        d_rect = QRectF(0.0, 106.0 * sc, w, 26.0 * sc)
+        painter.setPen(QColor(0, 0, 0, 75))
+        painter.drawText(d_rect.translated(0, 1.0), Qt.AlignHCenter | Qt.AlignVCenter, date_upper)
+        painter.setPen(QColor(242, 248, 255, 212))
+        painter.drawText(d_rect, Qt.AlignHCenter | Qt.AlignVCenter, date_upper)
