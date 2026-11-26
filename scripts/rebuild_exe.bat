@@ -20,6 +20,8 @@ python -m PyInstaller ^
     --hidden-import "win32com.client" ^
     --hidden-import "pythoncom" ^
     --hidden-import "pywintypes" ^
+    --collect-submodules "winrt" ^
+    --collect-binaries "winrt" ^
     --exclude-module "PySide6.QtWebEngineCore" ^
     --exclude-module "PySide6.QtWebEngineWidgets" ^
     --exclude-module "PySide6.QtQml" ^

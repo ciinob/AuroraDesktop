@@ -24,11 +24,12 @@ class AuroraMemoCard(AuroraBaseWindow):
     HEADER_HEIGHT = 38
     EXPANDED_HEIGHT = 196
 
-    def __init__(self, pinned: bool = True, allow_drag_provider=None, theme_provider=None, opacity_provider=None):
+    def __init__(self, pinned: bool = True, allow_drag_provider=None, theme_provider=None, opacity_provider=None, snap_manager=None):
         super().__init__(
             allow_drag_provider=allow_drag_provider,
             theme_provider=theme_provider,
             opacity_provider=opacity_provider,
+            snap_manager=snap_manager,
         )
         self.group_key = "__AURORA_MEMO__"
         self.title = "QUICK MEMO · 速记"
@@ -146,11 +147,7 @@ class AuroraMemoCard(AuroraBaseWindow):
         pos = event.position()
         self._hover_pin = self._pin_rect.contains(pos)
         if self._dragging and (event.buttons() & Qt.LeftButton):
-            new_pos = event.globalPosition().toPoint() - self._drag_offset
-            if abs(new_pos.x() - 24) <= 12:
-                new_pos.setX(24)
-            self.move(new_pos)
-            self.positionChangedByUser.emit()
+            self._move_smart_drag(event.globalPosition().toPoint(), event.modifiers())
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
@@ -162,8 +159,7 @@ class AuroraMemoCard(AuroraBaseWindow):
                 self.update()
                 return
             if pos.y() <= self.HEADER_HEIGHT and self._allow_drag_provider():
-                self._dragging = True
-                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._begin_smart_drag(event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -178,7 +174,7 @@ class AuroraMemoCard(AuroraBaseWindow):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._dragging = False
+        self._end_smart_drag()
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):

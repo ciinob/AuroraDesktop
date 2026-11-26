@@ -4,13 +4,13 @@
 
 # Aurora Desktop · 极光桌面
 
-**Windows 11 桌面美学套件：毛玻璃收纳 · 全局搜索 · 艺术时钟 · 全透明任务栏**
+**Windows 11 桌面美学套件：毛玻璃收纳 · 媒体胶囊 · 全局搜索 · 艺术时钟 · 全透明任务栏**
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Release](https://img.shields.io/github/v/release/ciinob/AuroraDesktop?color=2dd4bf&label=Release)](https://github.com/ciinob/AuroraDesktop/releases)
 [![Built with](https://img.shields.io/badge/Built%20with-PySide6%20%2B%20C%2B%2B-a855f7)](https://github.com/ciinob/AuroraDesktop)
 
-中文 | **[English](README.en.md)**
+中文 | **[English](README.en.md)** | **[更新日志](CHANGELOG.md)**
 
 单文件、免安装、开机自启。双击 `AuroraDesktop.exe`，桌面即刻焕然一新。
 
@@ -32,7 +32,7 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 
 ![竖版全景：AI 栏 / 研发 / 娱乐 / 网络工具四组胶囊](docs/images/capsule-full.jpg)
 
-## 🚀 四大核心能力
+## 🚀 五大核心能力
 
 ### 🔍 极光全局搜索（Aurora Spotlight）
 任何界面下，**连按两下 `Ctrl`**（或 `Alt + S`）秒级唤出：
@@ -52,12 +52,19 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 | `Alt + Enter` | 打开文件所在位置 |
 | `Esc` | 关闭 |
 
-### 🧊 极光胶囊收纳与实时目录映射
-- 桌面图标按 **AI 工具 / 研发 / 娱乐 / 网络工具 / 文档** 自动分组进毛玻璃卡片，自动卷起、磁吸对齐
+### 🧊 极光胶囊收纳、智能参考线与布局预设
+- 桌面图标按 **AI 工具 / 研发 / 娱乐 / 网络工具 / 文档** 自动分组进毛玻璃卡片，支持自动卷起与多屏防出屏保护
+- **🧲 智能参考线与磁吸对齐预览（Smart Guides）**：拖动任意胶囊、卡片、媒体栏或时钟时，实时显示边缘/中线对齐参考线、Figma 级等距分布标尺与柔光磁吸预览框（按住 `Alt` 临时禁用吸附）
+- **📐 多套桌面布局预设**：内置「左侧黄金纵列 / 双翼对称分栏 / 极简留白模式」一键切换，并支持保存任意自定义桌面布局
 - **📂 文件夹实时映射胶囊（Folder Portal）**：直接将 `Downloads`、近期截图或工作目录映射为桌面胶囊，新文件毫秒级自动浮现，支持直接从胶囊拖出文件发微信/上传网页
 - **✨ 一键隐藏系统原生桌面图标 + 动态回收站**：无损隐藏杂乱的原桌面图标（退出自动还原）；内置此电脑、动态空/满状态回收站（右键一键清空）
-- **图标自由拖拽排序 & 自定义图标**：跨胶囊自由拖放，支持为任意条目替换 PNG / ICO / EXE 图标并自适应提取品牌色光晕
+- **图标自由拖拽排序 & 自定义图标**：跨胶囊拖放实时显示极光发光插入指示线，支持为任意条目替换 PNG / ICO / EXE 图标并自适应提取品牌色光晕
 - 4 套极光色温 × 3 档玻璃通透度，主控台一键切换
+
+### 🎵 极光媒体播放胶囊（Windows SMTC）
+- 自动识别 **网易云音乐 / Apple Music / Spotify / QQ 音乐 / Edge / Chrome / Firefox / Bilibili** 等正在播放的媒体，优先锁定音乐播放器
+- **专辑封面自适应极光背光**：实时提取封面主色调渲染极光氛围背光与边框光晕，搭配高对比度清晰排版与底部进度细条
+- **悬停切歌 & 滚轮切源**：常态显示极光动态音律条，鼠标悬停平滑淡入上一首 / 播放暂停 / 下一首控制按钮；多音源同时开启时支持滚轮或右键一键切换
 
 ### 🕒 高定艺术桌面时钟
 8 种手工调校的字体风格，冒号与饰线实时跟随主题色温，秒/分钟边界精准对齐刷新（不显示秒时每分钟仅重绘一次，零负担）：
@@ -81,8 +88,8 @@ Aurora Desktop 是一套专为深色壁纸深度定制的桌面增强套件：�
 
 ![浅色壁纸下的时钟风格](docs/images/clock-styles-light.png)
 
-### 🪟 全透明动态任务栏引擎
-自绘 C++ 原生引擎（`AuroraTaskbarTAP.dll`，XAML `BackgroundFill` + Win32 `ACCENT_ENABLE_TRANSPARENTGRADIENT` 双管齐下），桌面空闲时任务栏真正"消失"；**支持窗口最大化时自动切换深色毛玻璃**，兼顾通透壁纸美学与白底窗口可读性——彻底告别 TranslucentTB 的黑边冲突。
+### 🪟 全透明动态任务栏引擎与多屏稳定守护
+自绘 C++ 原生引擎（`AuroraTaskbarTAP.dll`，XAML `BackgroundFill` + Win32 `ACCENT_ENABLE_TRANSPARENTGRADIENT` 双管齐下），桌面空闲时任务栏真正"消失"；**支持窗口最大化时自动切换深色毛玻璃**，兼顾通透壁纸美学与白底窗口可读性——彻底告别 TranslucentTB 的黑边冲突。内置显示器热插拔 / 断电冷却保护，切屏后自动重建毛玻璃表面并将外接屏上的组件拉回可见屏幕。
 
 ## 📦 安装与使用
 

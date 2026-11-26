@@ -48,6 +48,7 @@ MA_NOACTIVATE = 3
 WM_SYSCOMMAND = 0x0112
 WM_COMMAND = 0x0111
 WM_HOTKEY = 0x0312
+WM_DISPLAYCHANGE = 0x007E
 SC_MINIMIZE = 0xF020
 SHELL_TOGGLE_DESKTOP_ICONS_CMD = 0x7402
 
@@ -261,6 +262,9 @@ user32.GetAncestor.restype = wintypes.HWND
 
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
+
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
 
 user32.SetWindowPos.argtypes = [
     wintypes.HWND, wintypes.HWND,
@@ -578,9 +582,9 @@ def apply_dark_title_bar(hwnd: int):
     )
 
 
-def apply_acrylic_and_rounded_corners(hwnd: int):
+def apply_acrylic_and_rounded_corners(hwnd: int, reset_first: bool = False):
     """Enable Windows 11 rounded composition surface + Acrylic Gaussian blur."""
-    if not hwnd:
+    if not hwnd or not user32.IsWindow(hwnd):
         return
 
     # 1. Native Windows 11 hardware-anti-aliased rounded corners (prevents square acrylic bleed)
@@ -595,15 +599,22 @@ def apply_acrylic_and_rounded_corners(hwnd: int):
     # 2. Windows 11 Acrylic blur behind window (persists even when unfocused on desktop)
     # GradientColor is AABBGGRR: tiny non-zero alpha (0x02) activates full blur while Qt controls exact RGBA tint
     accent = ACCENT_POLICY()
-    accent.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
-    accent.AccentFlags = 0
-    accent.GradientColor = 0x021C0F0A
-    accent.AnimationId = 0
-
     data = WINDOWCOMPOSITIONATTRIBDATA()
     data.Attrib = WCA_ACCENT_POLICY
     data.pvData = ctypes.cast(ctypes.byref(accent), ctypes.c_void_p)
     data.cbData = ctypes.sizeof(accent)
+
+    if reset_first:
+        accent.AccentState = 0
+        accent.AccentFlags = 0
+        accent.GradientColor = 0
+        accent.AnimationId = 0
+        user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
+
+    accent.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
+    accent.AccentFlags = 0
+    accent.GradientColor = 0x021C0F0A
+    accent.AnimationId = 0
 
     ok = user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
     if not ok:
@@ -613,7 +624,7 @@ def apply_acrylic_and_rounded_corners(hwnd: int):
 
 def pin_window_to_desktop_bottom(hwnd: int):
     """Pin window above wallpaper, below normal windows, hidden from Alt+Tab, surviving Win+D."""
-    if not hwnd:
+    if not hwnd or not user32.IsWindow(hwnd):
         return
 
     ex_style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
@@ -623,7 +634,7 @@ def pin_window_to_desktop_bottom(hwnd: int):
 
     # Set Owner to Desktop host (Progman/WorkerW) so Win+D keeps cards visible above desktop!
     host_hwnd, _, _ = find_desktop_shell_host()
-    if host_hwnd:
+    if host_hwnd and user32.IsWindow(host_hwnd):
         user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, LONG_PTR(host_hwnd))
 
     send_to_bottom(hwnd)

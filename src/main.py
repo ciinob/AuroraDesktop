@@ -17,10 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from clock_widget import AuroraClockWidget
 from icon_extractor import ShortcutIconLoader, item_rel_key, query_recycle_bin_state
+from media_capsule import AuroraMediaCapsule
 from memo_card import AuroraMemoCard
 from organize_shortcuts import scan_and_organize
 from paths import APP_VERSION, CONFIG_PATH, DATA_ROOT, FONTS_DIR, GROUPS_DIR, ICON_ICO_PATH, ICON_PNG_PATH
 from settings_dialog import AuroraSettingsWindow
+from smart_guides import SmartGuideManager
 from spotlight import AuroraSpotlightOverlay
 from taskbar_engine import TaskbarTransparencyEngine, import_existing_ttb_config
 from updater import UpdateChecker
@@ -52,6 +54,7 @@ from win32_utils import (
     MOD_NOREPEAT,
     WM_AURORA_OPEN_PANEL,
     WM_AURORA_SHOW,
+    WM_DISPLAYCHANGE,
     WM_HOTKEY,
     are_system_desktop_icons_visible,
     batch_defer_window_rects,
@@ -102,6 +105,7 @@ class HotkeyReceiver(QWidget):
         on_toggle_memo,
         on_force_show,
         on_explorer_restarted,
+        on_display_changed=None,
     ):
         super().__init__()
         self._on_toggle_vis = on_toggle_vis
@@ -111,6 +115,7 @@ class HotkeyReceiver(QWidget):
         self._on_toggle_memo = on_toggle_memo
         self._on_force_show = on_force_show
         self._on_explorer_restarted = on_explorer_restarted
+        self._on_display_changed = on_display_changed
         self._registered_ids: set[int] = set()
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
         self.resize(1, 1)
@@ -178,6 +183,9 @@ class HotkeyReceiver(QWidget):
             elif WM_TASKBAR_CREATED and msg.message == WM_TASKBAR_CREATED:
                 self._on_explorer_restarted()
                 return True, 0
+            elif msg.message == WM_DISPLAYCHANGE:
+                if self._on_display_changed:
+                    self._on_display_changed()
         return super().nativeEvent(eventType, message)
 
     def cleanup(self):
@@ -205,6 +213,7 @@ class AuroraController(QObject):
         self.config = self._load_config()
         self.visible_state = True
         self.lock_positions = bool(self.config.get("lock_positions", False))
+        self.smart_guides_enabled = bool(self.config.get("smart_guides", True))
         self.double_click_hide = bool(self.config.get("double_click_hide", True))
         self.hide_desktop_icons: bool | None = (
             bool(self.config["hide_desktop_icons"]) if "hide_desktop_icons" in self.config else None
@@ -219,15 +228,18 @@ class AuroraController(QObject):
 
         self.show_memo = bool(self.config.get("show_memo", False))
         self.memo_pinned = bool(self.config.get("memo_pinned", True))
+        self.show_media_capsule = bool(self.config.get("show_media_capsule", True))
         self.item_orders: dict[str, list[str]] = dict(self.config.get("item_orders", {}))
         self.custom_icons: dict[str, str] = {
             k.lower(): v for k, v in dict(self.config.get("custom_icons", {})).items()
         }
         self.dragged_keys: set[str] = set(self.config.get("dragged_keys", []))
+        self.layout_presets: dict[str, dict] = dict(self.config.get("layout_presets", {}))
         self.hotkeys_cfg: dict = {**DEFAULT_HOTKEYS, **dict(self.config.get("hotkeys", {}))}
         self.hotkey_status: dict[str, bool] = {"spotlight": True, "toggle_cards": True, "settings": True}
         self.windows: list[AuroraBaseWindow] = []
         self.memo_card: AuroraMemoCard | None = None
+        self.media_capsule: AuroraMediaCapsule | None = None
         self.spotlight: AuroraSpotlightOverlay | None = None
         self.settings_win: AuroraSettingsWindow | None = None
 
@@ -245,6 +257,18 @@ class AuroraController(QObject):
         self.header_font_family = "Inter"
         self.icon_loader = ShortcutIconLoader(self.custom_icons)
 
+        # 0. Unified Smart Guides & Magnetic Snap Engine (Capsules, Cards, Memo & Clock)
+        self.smart_guides = SmartGuideManager(
+            widgets_provider=self._all_snap_widgets,
+            theme_provider=self.get_current_theme_colors,
+            enabled_provider=lambda: self.smart_guides_enabled,
+            margin_x=self.LEFT_MARGIN,
+            margin_y=self.TOP_MARGIN,
+            card_gap=self.CARD_GAP,
+            col_gap=self.COL_GAP,
+            snap_threshold=10,
+        )
+
         # 1. Native Desktop Clock
         default_clock_cfg = {
             "enabled": True,
@@ -261,6 +285,7 @@ class AuroraController(QObject):
         self.clock_widget = AuroraClockWidget(
             clock_cfg=self.clock_cfg,
             theme_provider=self.get_current_theme_colors,
+            snap_manager=self.smart_guides,
         )
         self.clock_widget.configChanged.connect(self._on_subcomponent_changed)
         self.clock_widget.openSettingsRequested.connect(lambda: self.open_settings("appearance"))
@@ -279,8 +304,10 @@ class AuroraController(QObject):
 
         self.windows: list[AuroraBaseWindow] = []
         self.memo_card: AuroraMemoCard | None = None
+        self.media_capsule: AuroraMediaCapsule | None = None
         self._build_all_windows()
         self._sync_memo_card(initial=True)
+        self._sync_media_capsule(initial=True)
         self._apply_initial_positions()
 
         # Global Aurora Spotlight Search Overlay
@@ -315,7 +342,16 @@ class AuroraController(QObject):
         if self.hotkeys_cfg.get("double_ctrl_spotlight", True):
             self.ctrl_watcher.start()
 
-        # Configurable global hotkeys + Explorer restart recovery
+        # Configurable global hotkeys + Explorer restart & display-change recovery
+        self._display_recovery_timer = QTimer(self)
+        self._display_recovery_timer.setSingleShot(True)
+        self._display_recovery_timer.setInterval(1600)
+        self._display_recovery_timer.timeout.connect(self._on_display_topology_settled)
+
+        self.app.screenAdded.connect(lambda _s: self._on_display_topology_changed())
+        self.app.screenRemoved.connect(lambda _s: self._on_display_topology_changed())
+        self.app.primaryScreenChanged.connect(lambda _s: self._on_display_topology_changed())
+
         self.hotkey_receiver = HotkeyReceiver(
             self.toggle_all_visibility,
             self.spotlight.toggle_spotlight,
@@ -324,6 +360,7 @@ class AuroraController(QObject):
             self.toggle_memo_card,
             self.force_show_and_showcase,
             self._on_explorer_restarted,
+            self._on_display_topology_changed,
         )
         self.hotkey_status = self.hotkey_receiver.apply_hotkeys(
             self.hotkeys_cfg.get("toggle_cards", ""),
@@ -346,6 +383,8 @@ class AuroraController(QObject):
             w.show()
         if self.memo_card and self.show_memo:
             self.memo_card.show()
+        if self.media_capsule and self.show_media_capsule:
+            self.media_capsule.show()
         if self.clock_cfg.get("enabled", True):
             self.clock_widget.show()
 
@@ -461,6 +500,7 @@ class AuroraController(QObject):
                 title=title,
                 badge_text=badge,
                 show_search_pill=is_first_bar,
+                snap_manager=self.smart_guides,
             )
             win.orderChanged.connect(self._on_order_changed)
             win.spotlightRequested.connect(lambda: self.spotlight.toggle_spotlight())
@@ -480,6 +520,7 @@ class AuroraController(QObject):
                 is_portal=is_portal,
                 portal_sort_provider=self.get_portal_sort,
                 portal_max_provider=self.get_portal_max_items,
+                snap_manager=self.smart_guides,
             )
             win.heightAnimated.connect(self.reflow_vertical_stack)
             win.pinToggled.connect(self._on_pin_toggled)
@@ -522,6 +563,7 @@ class AuroraController(QObject):
                 allow_drag_provider=lambda: not self.lock_positions,
                 theme_provider=self.get_current_theme_colors,
                 opacity_provider=self.get_current_glass_opacity,
+                snap_manager=self.smart_guides,
             )
             self.memo_card.heightAnimated.connect(self.reflow_vertical_stack)
             self.memo_card.pinToggled.connect(self._on_memo_pin_toggled)
@@ -556,6 +598,42 @@ class AuroraController(QObject):
         self.memo_pinned = pinned
         self._save_config()
 
+    def _sync_media_capsule(self, initial: bool = False):
+        if self.show_media_capsule and self.media_capsule is None:
+            self.media_capsule = AuroraMediaCapsule(
+                allow_drag_provider=lambda: not self.lock_positions,
+                theme_provider=self.get_current_theme_colors,
+                opacity_provider=self.get_current_glass_opacity,
+                snap_manager=self.smart_guides,
+            )
+            self.media_capsule.closeMediaRequested.connect(self.toggle_media_capsule)
+            self.media_capsule.positionChangedByUser.connect(lambda: self._on_user_dragged("__AURORA_MEDIA__"))
+            if not initial and self.visible_state:
+                self.reflow_vertical_stack()
+                self.media_capsule.show()
+        elif not self.show_media_capsule and self.media_capsule is not None:
+            self.media_capsule.shutdown()
+            self.media_capsule.close()
+            self.media_capsule.deleteLater()
+            self.media_capsule = None
+            self.reflow_vertical_stack()
+
+    def set_show_media_capsule(self, show: bool):
+        show = bool(show)
+        if self.show_media_capsule == show:
+            return
+        self.show_media_capsule = show
+        self._sync_media_capsule(initial=False)
+        if hasattr(self, "act_media_tray"):
+            self.act_media_tray.blockSignals(True)
+            self.act_media_tray.setChecked(self.show_media_capsule)
+            self.act_media_tray.blockSignals(False)
+        self._save_config()
+        self.stateChanged.emit()
+
+    def toggle_media_capsule(self):
+        self.set_show_media_capsule(not self.show_media_capsule)
+
     def _load_config(self) -> dict:
         if CONFIG_PATH.exists():
             try:
@@ -568,6 +646,8 @@ class AuroraController(QObject):
         positions = {w.group_key: [w.x(), w.y()] for w in self.windows}
         if self.memo_card is not None:
             positions["__AURORA_MEMO__"] = [self.memo_card.x(), self.memo_card.y()]
+        if self.media_capsule is not None:
+            positions["__AURORA_MEDIA__"] = [self.media_capsule.x(), self.media_capsule.y()]
         pinned = dict(self.config.get("pinned", {}))
         for w in self.windows:
             if isinstance(w, CollapsibleAuroraCard):
@@ -581,6 +661,7 @@ class AuroraController(QObject):
             "glass_opacity": self.opacity_key,
             "show_memo": self.show_memo,
             "memo_pinned": self.memo_pinned,
+            "show_media_capsule": self.show_media_capsule,
             "double_click_hide": self.double_click_hide,
             "hotkeys": self.hotkeys_cfg,
             "custom_icons": self.custom_icons,
@@ -588,8 +669,10 @@ class AuroraController(QObject):
             "taskbar": self.taskbar_cfg,
             "item_orders": self.item_orders,
             "lock_positions": self.lock_positions,
+            "smart_guides": self.smart_guides_enabled,
             "dragged_keys": sorted(self.dragged_keys),
             "positions": positions,
+            "layout_presets": self.layout_presets,
         }
         if self.hide_desktop_icons is not None:
             data["hide_desktop_icons"] = self.hide_desktop_icons
@@ -599,7 +682,15 @@ class AuroraController(QObject):
         wins = list(self.windows)
         if self.memo_card is not None and self.show_memo:
             wins.append(self.memo_card)
+        if self.media_capsule is not None and self.show_media_capsule:
+            wins.append(self.media_capsule)
         return wins
+
+    def _all_snap_widgets(self) -> list[QWidget]:
+        widgets: list[QWidget] = list(self._all_stackable_windows())
+        if hasattr(self, "clock_widget") and self.clock_widget is not None:
+            widgets.append(self.clock_widget)
+        return widgets
 
     def _apply_initial_positions(self):
         saved_pos = self.config.get("positions", {})
@@ -614,6 +705,161 @@ class AuroraController(QObject):
         self.reflow_vertical_stack()
         if save:
             self._save_config()
+
+    def get_builtin_layout_presets(self) -> list[tuple[str, str]]:
+        return [
+            ("left_golden", "📐 左侧黄金纵列（默认经典）"),
+            ("dual_wings", "🪽 双翼对称分栏（左右卡片 + 居中时钟）"),
+            ("zen_minimal", "🌿 极简留白模式（自动卷起 + 居中时钟）"),
+        ]
+
+    def apply_builtin_layout(self, preset_key: str):
+        screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        left_x = (avail.x() if avail else 0) + self.LEFT_MARGIN
+        top_y = (avail.y() if avail else 0) + self.TOP_MARGIN
+        right_edge = (avail.x() + avail.width() if avail else 1920) - self.LEFT_MARGIN
+        center_x = (avail.x() + avail.width() // 2) if avail else 960
+
+        if preset_key == "left_golden":
+            self.dragged_keys.clear()
+            self.reflow_vertical_stack()
+            self.clock_widget._reset_top_right()
+            self._save_config()
+            self.stateChanged.emit()
+            return
+
+        if preset_key == "dual_wings":
+            self.dragged_keys.clear()
+            all_wins = self._all_stackable_windows()
+            bars = [w for w in all_wins if isinstance(w, AICapsuleBar)]
+            cards = [w for w in all_wins if not isinstance(w, AICapsuleBar)]
+
+            left_y = top_y
+            for b in bars:
+                b.move(left_x, left_y)
+                self.dragged_keys.add(b.group_key)
+                left_y += b.height() + self.CARD_GAP + 2
+
+            right_y = top_y
+            half = (len(cards) + 1) // 2
+            for w in cards[:half]:
+                w.move(left_x, left_y)
+                self.dragged_keys.add(w.group_key)
+                dh = w.desired_stack_height() if hasattr(w, "desired_stack_height") else w.height()
+                left_y += dh + self.CARD_GAP
+            for w in cards[half:]:
+                rx = max(left_x, right_edge - w.width())
+                w.move(rx, right_y)
+                self.dragged_keys.add(w.group_key)
+                dh = w.desired_stack_height() if hasattr(w, "desired_stack_height") else w.height()
+                right_y += dh + self.CARD_GAP
+
+            # Center clock horizontally near top
+            clk_x = int(center_x - self.clock_widget.width() // 2)
+            clk_y = top_y
+            self.clock_cfg["x"] = clk_x
+            self.clock_cfg["y"] = clk_y
+            self.clock_widget.move(clk_x, clk_y)
+            self._save_config()
+            self.stateChanged.emit()
+            return
+
+        if preset_key == "zen_minimal":
+            self.dragged_keys.clear()
+            for c in self.cards:
+                c.pinned = False
+                c.collapse_card(force=True)
+                c.update()
+            if self.memo_card is not None:
+                self.memo_card.pinned = False
+                self.memo_card.collapse_card(force=True)
+                self.memo_card.update()
+            self.reflow_vertical_stack()
+            # Center clock prominently in upper-middle focal area
+            clk_x = int(center_x - self.clock_widget.width() // 2)
+            clk_y = (avail.y() if avail else 0) + max(48, int((avail.height() if avail else 1040) * 0.14))
+            self.clock_cfg["x"] = clk_x
+            self.clock_cfg["y"] = clk_y
+            self.clock_widget.move(clk_x, clk_y)
+            self._save_config()
+            self.stateChanged.emit()
+
+    def save_layout_preset(self, name: str) -> bool:
+        clean = name.strip()
+        if not clean:
+            return False
+        positions = {w.group_key: [w.x(), w.y()] for w in self._all_stackable_windows()}
+        pinned = {c.group_key: bool(c.pinned) for c in self.cards}
+        self.layout_presets[clean] = {
+            "positions": positions,
+            "dragged_keys": sorted(self.dragged_keys),
+            "pinned": pinned,
+            "clock": {
+                "x": self.clock_widget.x(),
+                "y": self.clock_widget.y(),
+                "enabled": bool(self.clock_cfg.get("enabled", True)),
+            },
+            "show_memo": bool(self.show_memo),
+            "memo_pinned": bool(self.memo_pinned),
+        }
+        self._save_config()
+        self.stateChanged.emit()
+        return True
+
+    def apply_layout_preset(self, name: str) -> bool:
+        preset = self.layout_presets.get(name)
+        if not isinstance(preset, dict):
+            return False
+
+        if "show_memo" in preset:
+            self.set_show_memo(bool(preset["show_memo"]))
+        if "memo_pinned" in preset and self.memo_card is not None:
+            self.memo_pinned = bool(preset["memo_pinned"])
+            self.memo_card.pinned = self.memo_pinned
+            self.memo_card.update()
+
+        pinned_map = preset.get("pinned", {})
+        for c in self.cards:
+            if c.group_key in pinned_map:
+                c.pinned = bool(pinned_map[c.group_key])
+                if c.pinned:
+                    c.expand_card()
+                else:
+                    c.collapse_card(force=True)
+                c.update()
+
+        self.dragged_keys = set(preset.get("dragged_keys", []))
+        self.reflow_vertical_stack()
+
+        saved_pos = preset.get("positions", {})
+        for w in self._all_stackable_windows():
+            if w.group_key in saved_pos and len(saved_pos[w.group_key]) == 2:
+                wx, wy = int(saved_pos[w.group_key][0]), int(saved_pos[w.group_key][1])
+                w.move(wx, wy)
+                self.dragged_keys.add(w.group_key)
+
+        clk = preset.get("clock")
+        if isinstance(clk, dict):
+            if "enabled" in clk:
+                self.clock_widget._set_enabled(bool(clk["enabled"]))
+            if clk.get("x") is not None and clk.get("y") is not None:
+                cx, cy = int(clk["x"]), int(clk["y"])
+                self.clock_cfg["x"] = cx
+                self.clock_cfg["y"] = cy
+                self.clock_widget.move(cx, cy)
+
+        self._save_config()
+        self.stateChanged.emit()
+        return True
+
+    def delete_layout_preset(self, name: str) -> bool:
+        if name not in self.layout_presets:
+            return False
+        self.layout_presets.pop(name, None)
+        self._save_config()
+        self.stateChanged.emit()
+        return True
 
     def reflow_vertical_stack(self):
         screen = QGuiApplication.primaryScreen()
@@ -1093,6 +1339,13 @@ class AuroraController(QObject):
         self._save_config()
         self.stateChanged.emit()
 
+    def set_smart_guides_enabled(self, enabled: bool):
+        self.smart_guides_enabled = bool(enabled)
+        if not self.smart_guides_enabled:
+            self.smart_guides.end_drag()
+        self._save_config()
+        self.stateChanged.emit()
+
     def _on_fs_changed(self):
         known_folders = {p["folder"].lower() for p in self.partitions if p.get("folder") and p.get("kind") != "portal"}
         added_new = False
@@ -1147,11 +1400,61 @@ class AuroraController(QObject):
             hwnds.add(int(self.settings_win.winId()))
         return hwnds
 
+    def _on_display_topology_changed(self):
+        """Immediately pause DWM/taskbar mutations when a monitor connects/disconnects to prevent gray-screen hangs."""
+        self.smart_guides.end_drag(immediate=True)
+        if self.spotlight is not None and self.spotlight.isVisible():
+            self.spotlight.dismiss()
+        # Pause Win32 taskbar DWM calls while Windows/Explorer rebuilds display topology
+        self.taskbar_engine.pause_for_display_change(2.2)
+        self._display_recovery_timer.start()
+
+    def _rescue_widget_onto_visible_screen(self, w: QWidget, prefer_top_right: bool = False):
+        primary = QGuiApplication.primaryScreen()
+        if not primary:
+            return
+        avail = primary.availableGeometry()
+        rect = w.frameGeometry()
+        if QGuiApplication.screenAt(rect.center()) is not None:
+            return
+        if prefer_top_right:
+            nx = max(avail.x() + 12, avail.x() + avail.width() - w.width() - 28)
+            ny = avail.y() + 22
+        else:
+            nx = max(avail.x() + self.LEFT_MARGIN, min(avail.x() + avail.width() - w.width() - 12, rect.x()))
+            ny = max(avail.y() + self.TOP_MARGIN, min(avail.y() + avail.height() - w.height() - 12, rect.y()))
+        w.move(int(nx), int(ny))
+
+    def _on_display_topology_settled(self):
+        """After monitor hot-plug/unplug settles, cleanly rebuild Acrylic surfaces, re-pin desktop hosts, and rescue off-screen widgets."""
+        if not QGuiApplication.screens():
+            return
+
+        # 1. Reflow non-dragged cards and rescue any dragged widgets stranded on a disconnected monitor
+        self.reflow_vertical_stack()
+        for w in self._all_stackable_windows():
+            if w.group_key in self.dragged_keys:
+                self._rescue_widget_onto_visible_screen(w, prefer_top_right=False)
+            if w.isVisible():
+                w.ensure_native_desktop_style(reset_surface=True)
+                w.update()
+
+        if self.clock_widget.isVisible():
+            self._rescue_widget_onto_visible_screen(self.clock_widget, prefer_top_right=True)
+            self.clock_widget.ensure_desktop_pinned()
+            self.clock_widget.refresh()
+
+        if self.spotlight is not None:
+            self.spotlight._acrylic_ready = False
+
+        # 2. Re-apply taskbar transparency safely after the pause window expires
+        QTimer.singleShot(800, lambda: self.taskbar_engine.apply_all(force_reset_blur=True))
+
     def _on_explorer_restarted(self):
         """Re-pin all desktop widgets, re-show tray, and re-apply taskbar transparency after cold boot or Explorer restart."""
         for w in self._all_stackable_windows():
             if w.isVisible():
-                w.ensure_native_desktop_style()
+                w.ensure_native_desktop_style(reset_surface=True)
         if self.clock_widget.isVisible():
             self.clock_widget.ensure_desktop_pinned()
         if self.hide_desktop_icons is True:
@@ -1161,6 +1464,8 @@ class AuroraController(QObject):
             self.tray.show()
 
     def _enforce_all_bottom(self):
+        if self._display_recovery_timer.isActive():
+            return
         # Refresh Recycle Bin dynamic empty/full icon if state changed externally
         rb_now, _, _ = query_recycle_bin_state()
         if rb_now != self._last_rb_non_empty:
@@ -1328,6 +1633,11 @@ class AuroraController(QObject):
         self.act_memo_tray.setChecked(self.show_memo)
         self.act_memo_tray.triggered.connect(self.set_show_memo)
 
+        self.act_media_tray = menu.addAction("🎵 极光媒体播放胶囊")
+        self.act_media_tray.setCheckable(True)
+        self.act_media_tray.setChecked(self.show_media_capsule)
+        self.act_media_tray.triggered.connect(self.set_show_media_capsule)
+
         self.act_vis = menu.addAction("🙈 隐藏全部桌面卡片")
         self.act_vis.triggered.connect(self.toggle_all_visibility)
 
@@ -1443,6 +1753,10 @@ class AuroraController(QObject):
         self.hotkey_receiver.cleanup()
         if self.settings_win is not None:
             self.settings_win.close()
+        if self.media_capsule is not None:
+            self.media_capsule.shutdown()
+            self.media_capsule.close()
+        self.smart_guides.close()
         self.spotlight.close()
         self.clock_widget.close()
         self.tray.hide()

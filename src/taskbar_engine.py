@@ -58,6 +58,22 @@ SHARED_MEM_NAME = "Local\\AuroraTaskbarSharedState_v1"
 PERSISTENT_TAP_DLL = DATA_ROOT / "cache" / "AuroraTaskbarTAP.dll"
 
 
+def _collect_tray_hwnds() -> tuple[int, ...]:
+    hwnds: list[int] = []
+    primary = user32.FindWindowW("Shell_TrayWnd", None)
+    if primary and user32.IsWindow(primary) and user32.IsWindowVisible(primary):
+        hwnds.append(int(primary))
+
+    sec = None
+    while True:
+        sec = user32.FindWindowExW(None, sec, "Shell_SecondaryTrayWnd", None)
+        if not sec:
+            break
+        if user32.IsWindow(sec) and user32.IsWindowVisible(sec):
+            hwnds.append(int(sec))
+    return tuple(hwnds)
+
+
 def _set_tray_accent(state: int, flags: int = 0, color: int = 0):
     accent = ACCENT_POLICY()
     accent.AccentState = state
@@ -70,16 +86,9 @@ def _set_tray_accent(state: int, flags: int = 0, color: int = 0):
     data.pvData = ctypes.cast(ctypes.byref(accent), ctypes.c_void_p)
     data.cbData = ctypes.sizeof(accent)
 
-    primary = user32.FindWindowW("Shell_TrayWnd", None)
-    if primary:
-        user32.SetWindowCompositionAttribute(primary, ctypes.byref(data))
-
-    sec = None
-    while True:
-        sec = user32.FindWindowExW(None, sec, "Shell_SecondaryTrayWnd", None)
-        if not sec:
-            break
-        user32.SetWindowCompositionAttribute(sec, ctypes.byref(data))
+    for hwnd in _collect_tray_hwnds():
+        if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+            user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
 
 
 _backdrop_lock = threading.Lock()
@@ -153,6 +162,9 @@ class TaskbarTransparencyEngine(QObject):
         self._version = (int(time.time() * 1000) & 0x7FFFFFFF) or 1
         self._shm: mmap.mmap | None = None
         self._injected_pid = 0
+        self._last_inject_attempt = 0.0
+        self._display_pause_until = 0.0
+        self._last_applied_signature: tuple[str, tuple[int, ...]] | None = None
         self._maximized_active = False
 
         self._ensure_persistent_tap_dll()
@@ -187,11 +199,23 @@ class TaskbarTransparencyEngine(QObject):
             return "max_frosted"
         return base
 
+    def pause_for_display_change(self, seconds: float = 2.2):
+        """Suspend Win32 taskbar DWM calls while Windows switches/unplugs monitors."""
+        self._display_pause_until = max(self._display_pause_until, time.monotonic() + seconds)
+        self._last_applied_signature = None
+
+    def _is_display_paused(self) -> bool:
+        return time.monotonic() < self._display_pause_until
+
     def _poll_maximized_window(self):
+        if self._is_display_paused():
+            return
         now_max = self._detect_maximized_state()
         if now_max != self._maximized_active:
             self._maximized_active = now_max
-            apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=False)
+            mode_key = self._effective_mode_key()
+            self._last_applied_signature = (mode_key, _collect_tray_hwnds())
+            apply_win32_taskbar_backdrop(mode_key, force_reset_blur=False)
             self._write_shared_state()
 
     def _ensure_persistent_tap_dll(self):
@@ -248,6 +272,10 @@ class TaskbarTransparencyEngine(QObject):
             return False
         if pid == self._injected_pid:
             return True
+        now = time.monotonic()
+        if now - self._last_inject_attempt < 4.0:
+            return False
+        self._last_inject_attempt = now
 
         try:
             wux = ctypes.WinDLL("Windows.UI.Xaml.dll")
@@ -274,17 +302,26 @@ class TaskbarTransparencyEngine(QObject):
         return False
 
     def _check_explorer_alive(self):
-        if not self.cfg.get("enabled", True):
+        if not self.cfg.get("enabled", True) or self._is_display_paused():
             return
-        apply_win32_taskbar_backdrop(self._effective_mode_key())
+        mode_key = self._effective_mode_key()
+        hwnds = _collect_tray_hwnds()
+        sig = (mode_key, hwnds)
+        if hwnds and sig != self._last_applied_signature:
+            self._last_applied_signature = sig
+            apply_win32_taskbar_backdrop(mode_key)
         pid = _get_explorer_taskbar_pid()
         if pid > 0 and pid != self._injected_pid:
             self._write_shared_state()
             self._inject_tap_into_explorer()
 
     def apply_all(self, force_reset_blur: bool = True):
+        if self._is_display_paused():
+            return
         self._maximized_active = self._detect_maximized_state()
-        apply_win32_taskbar_backdrop(self._effective_mode_key(), force_reset_blur=force_reset_blur)
+        mode_key = self._effective_mode_key()
+        self._last_applied_signature = (mode_key, _collect_tray_hwnds())
+        apply_win32_taskbar_backdrop(mode_key, force_reset_blur=force_reset_blur)
         self._write_shared_state()
         if self.cfg.get("enabled", True):
             self._inject_tap_into_explorer()

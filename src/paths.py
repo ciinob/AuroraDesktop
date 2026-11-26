@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 
 
 def get_bundle_dir() -> Path:

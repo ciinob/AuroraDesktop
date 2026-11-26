@@ -194,12 +194,13 @@ class AuroraClockWidget(QWidget):
     BASE_W = 360
     BASE_H = 165
 
-    def __init__(self, clock_cfg: dict, theme_provider=None, parent=None):
+    def __init__(self, clock_cfg: dict, theme_provider=None, snap_manager=None, parent=None):
         super().__init__(parent)
         self.cfg = clock_cfg
         if self.cfg.get("style") not in CLOCK_STYLES:
             self.cfg["style"] = "nordic_modern"
         self._theme_provider = theme_provider or (lambda: (QColor("#2dd4bf"), QColor("#38bdf8"), QColor("#a855f7")))
+        self._snap_manager = snap_manager
         self._dragging = False
         self._drag_offset = QPoint()
         self._pinned_init = False
@@ -323,6 +324,11 @@ class AuroraClockWidget(QWidget):
 
     def hideEvent(self, event):
         self._tick_timer.stop()
+        if self._dragging:
+            self._dragging = False
+            self.unsetCursor()
+            if self._snap_manager is not None:
+                self._snap_manager.end_drag(self)
         super().hideEvent(event)
 
     def nativeEvent(self, eventType, message):
@@ -361,21 +367,26 @@ class AuroraClockWidget(QWidget):
             self._dragging = True
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self.setCursor(Qt.ClosedHandCursor)
+            if self._snap_manager is not None:
+                self._snap_manager.begin_drag(self)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging and (event.buttons() & Qt.LeftButton):
             new_pt = event.globalPosition().toPoint() - self._drag_offset
-            screen = QGuiApplication.screenAt(event.globalPosition().toPoint()) or QGuiApplication.primaryScreen()
-            if screen:
-                sg = screen.geometry()
-                if abs((new_pt.x() + self.width()) - (sg.right() - 24)) <= 14:
-                    new_pt.setX(sg.right() - 24 - self.width())
-                if abs(new_pt.y() - (sg.top() + 22)) <= 14:
-                    new_pt.setY(sg.top() + 22)
-                # Horizontal centre magnet
-                if abs((new_pt.x() + self.width() / 2) - sg.center().x()) <= 12:
-                    new_pt.setX(int(sg.center().x() - self.width() / 2))
+            if self._snap_manager is not None:
+                new_pt = self._snap_manager.snap_move(self, new_pt, event.modifiers(), preview_radius=16.0)
+            else:
+                screen = QGuiApplication.screenAt(event.globalPosition().toPoint()) or QGuiApplication.primaryScreen()
+                if screen:
+                    sg = screen.geometry()
+                    if abs((new_pt.x() + self.width()) - (sg.right() - 24)) <= 14:
+                        new_pt.setX(sg.right() - 24 - self.width())
+                    if abs(new_pt.y() - (sg.top() + 22)) <= 14:
+                        new_pt.setY(sg.top() + 22)
+                    # Horizontal centre magnet
+                    if abs((new_pt.x() + self.width() / 2) - sg.center().x()) <= 12:
+                        new_pt.setX(int(sg.center().x() - self.width() / 2))
             self.move(new_pt)
         super().mouseMoveEvent(event)
 
@@ -383,6 +394,8 @@ class AuroraClockWidget(QWidget):
         if self._dragging:
             self._dragging = False
             self.unsetCursor()
+            if self._snap_manager is not None:
+                self._snap_manager.end_drag(self)
             self.cfg["x"] = self.x()
             self.cfg["y"] = self.y()
             self.configChanged.emit()

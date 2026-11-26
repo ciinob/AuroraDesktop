@@ -925,14 +925,16 @@ class AuroraBaseWindow(QWidget):
 
     RADIUS = 14.0
 
-    def __init__(self, allow_drag_provider=None, theme_provider=None, opacity_provider=None, parent=None):
+    def __init__(self, allow_drag_provider=None, theme_provider=None, opacity_provider=None, snap_manager=None, parent=None):
         super().__init__(parent)
         self._allow_drag_provider = allow_drag_provider or (lambda: True)
         self._theme_provider = theme_provider or (lambda: AURORA_THEMES["aurora"][:3])
         self._opacity_provider = opacity_provider or (lambda: 135)
+        self._snap_manager = snap_manager
         self._acrylic_initialized = False
         self._menu_open = False
         self._dragging = False
+        self._drag_moved = False
         self._drag_offset = QPoint()
         self._cursor_pos = QPointF(-200.0, -200.0)
 
@@ -955,6 +957,39 @@ class AuroraBaseWindow(QWidget):
 
     def get_theme_colors(self) -> tuple[QColor, QColor, QColor]:
         return self._theme_provider()
+
+    def _begin_smart_drag(self, global_pt: QPoint):
+        self._dragging = True
+        self._drag_moved = False
+        self._drag_offset = global_pt - self.frameGeometry().topLeft()
+        self.setCursor(Qt.ClosedHandCursor)
+        if self._snap_manager is not None:
+            self._snap_manager.begin_drag(self)
+
+    def _move_smart_drag(self, global_pt: QPoint, modifiers: Qt.KeyboardModifiers):
+        new_pos = global_pt - self._drag_offset
+        if self._snap_manager is not None:
+            new_pos = self._snap_manager.snap_move(self, new_pos, modifiers, preview_radius=self.RADIUS)
+        elif abs(new_pos.x() - 24) <= 12:
+            new_pos.setX(24)
+        if new_pos != self.pos():
+            self._drag_moved = True
+            self.move(new_pos)
+
+    def _end_smart_drag(self):
+        if self._dragging:
+            moved = self._drag_moved
+            self._dragging = False
+            self._drag_moved = False
+            self.unsetCursor()
+            if self._snap_manager is not None:
+                self._snap_manager.end_drag(self)
+            if moved:
+                self.positionChangedByUser.emit()
+
+    def hideEvent(self, event):
+        self._end_smart_drag()
+        super().hideEvent(event)
 
     def update_cursor_spotlight(self, local_pt: QPoint):
         self._cursor_pos = QPointF(local_pt)
@@ -995,9 +1030,9 @@ class AuroraBaseWindow(QWidget):
         self._fade_anim.setEndValue(1.0)
         self._fade_anim.start()
 
-    def ensure_native_desktop_style(self):
+    def ensure_native_desktop_style(self, reset_surface: bool = False):
         hwnd = int(self.winId())
-        apply_acrylic_and_rounded_corners(hwnd)
+        apply_acrylic_and_rounded_corners(hwnd, reset_first=reset_surface)
         pin_window_to_desktop_bottom(hwnd)
         self._acrylic_initialized = True
 
@@ -1140,11 +1175,13 @@ class AICapsuleBar(AuroraBaseWindow):
         title: str = "AI 悬浮胶囊栏",
         badge_text: str = "AI",
         show_search_pill: bool = True,
+        snap_manager=None,
     ):
         super().__init__(
             allow_drag_provider=allow_drag_provider,
             theme_provider=theme_provider,
             opacity_provider=opacity_provider,
+            snap_manager=snap_manager,
         )
         self.group_key = group_key
         self.title = title
@@ -1157,6 +1194,8 @@ class AICapsuleBar(AuroraBaseWindow):
         self._custom_order_provider = custom_order_provider or (lambda _: [])
         self._hover_search = False
         self._hover_settings = False
+        self._drop_insert_idx: int | None = None
+        self._tile_count = 0
         self._search_rect = QRectF(self.CARD_WIDTH - 68.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
         self._settings_rect = QRectF(self.CARD_WIDTH - 36.0, 14.0, 26.0, self.CARD_HEIGHT - 28.0)
 
@@ -1181,6 +1220,7 @@ class AICapsuleBar(AuroraBaseWindow):
 
         files = list_valid_partition_items(self.folder_path)
         files = sort_group_items(self.group_key, files, self._custom_order_provider(self.group_key))
+        self._tile_count = len(files)
 
         extra_right = 74 if self.show_search_pill else 12
         needed_w = max(self.CARD_WIDTH, 54 + len(files) * 55 + extra_right)
@@ -1215,8 +1255,7 @@ class AICapsuleBar(AuroraBaseWindow):
                 self.openSettingsRequested.emit("general", None)
                 return
             if pos.x() < 52 and self._allow_drag_provider():
-                self._dragging = True
-                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._begin_smart_drag(event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1225,7 +1264,7 @@ class AICapsuleBar(AuroraBaseWindow):
         was_hov_g = self._hover_settings
         self._hover_search = self.show_search_pill and self._search_rect.contains(pos)
         self._hover_settings = self.show_search_pill and self._settings_rect.contains(pos)
-        if self._hover_search != was_hov_s or self._hover_settings != was_hov_g:
+        if not self._dragging and (self._hover_search != was_hov_s or self._hover_settings != was_hov_g):
             any_pill = self._hover_search or self._hover_settings
             self.setCursor(Qt.PointingHandCursor if any_pill else Qt.ArrowCursor)
             if self._hover_search:
@@ -1237,15 +1276,11 @@ class AICapsuleBar(AuroraBaseWindow):
             self.update()
 
         if self._dragging and (event.buttons() & Qt.LeftButton):
-            new_pos = event.globalPosition().toPoint() - self._drag_offset
-            if abs(new_pos.x() - 24) <= 12:
-                new_pos.setX(24)
-            self.move(new_pos)
-            self.positionChangedByUser.emit()
+            self._move_smart_drag(event.globalPosition().toPoint(), event.modifiers())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._dragging = False
+        self._end_smart_drag()
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
@@ -1280,13 +1315,36 @@ class AICapsuleBar(AuroraBaseWindow):
         elif chosen == act_hide:
             self.contextActionTriggered.emit("toggle_visibility")
 
+    def _calc_drop_index(self, x: float) -> int:
+        raw_idx = int(round((x - 52.0) / 55.0))
+        return max(0, min(self._tile_count, raw_idx))
+
     def dragEnterEvent(self, event):
         md = event.mimeData()
         if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
+            self._drop_insert_idx = self._calc_drop_index(event.position().x())
+            self.update()
             event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
+            idx = self._calc_drop_index(event.position().x())
+            if idx != self._drop_insert_idx:
+                self._drop_insert_idx = idx
+                self.update()
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        if self._drop_insert_idx is not None:
+            self._drop_insert_idx = None
+            self.update()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
         drop_x = event.position().x()
+        self._drop_insert_idx = None
+        self.update()
         md = event.mimeData()
         if md.hasFormat(AURORA_MIME_TYPE):
             raw = bytes(md.data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
@@ -1393,6 +1451,25 @@ class AICapsuleBar(AuroraBaseWindow):
                 y2 = gcy + math.sin(ang) * 6.2
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
+        # Live drag-to-reorder glowing insertion indicator bar
+        if self._drop_insert_idx is not None:
+            ix = 52.0 + self._drop_insert_idx * 55.0
+            max_ix = float(self.width() - (76 if self.show_search_pill else 14))
+            ix = max(52.0, min(max_ix, ix))
+            y1, y2 = 12.0, float(self.height() - 12.0)
+            halo = QColor(c1); halo.setAlpha(90)
+            painter.setPen(QPen(halo, 6.0, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(ix, y1), QPointF(ix, y2))
+            igrad = QLinearGradient(ix, y1, ix, y2)
+            igrad.setColorAt(0.0, c1)
+            igrad.setColorAt(1.0, c2)
+            painter.setPen(QPen(igrad, 2.4, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(ix, y1), QPointF(ix, y2))
+            painter.setBrush(QColor(255, 255, 255, 240))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(ix, y1), 2.5, 2.5)
+            painter.drawEllipse(QPointF(ix, y2), 2.5, 2.5)
+
 
 class CollapsibleAuroraCard(AuroraBaseWindow):
     """Collapsible Aurora glass partition card with cursor spotlight, wheel fold, and drag-to-reorder."""
@@ -1432,11 +1509,13 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         is_portal: bool = False,
         portal_sort_provider=None,
         portal_max_provider=None,
+        snap_manager=None,
     ):
         super().__init__(
             allow_drag_provider=allow_drag_provider,
             theme_provider=theme_provider,
             opacity_provider=opacity_provider,
+            snap_manager=snap_manager,
         )
         self.group_key = group_key
         self.title = title
@@ -1459,6 +1538,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         self._grid_snapshot: QPixmap | None = None
         self._pin_rect = QRectF(self.CARD_WIDTH - 34, 9, 20, 20)
         self._hover_pin = False
+        self._drop_insert_idx: int | None = None
 
         self.setFixedWidth(self.CARD_WIDTH)
         self.setMinimumHeight(self.HEADER_HEIGHT)
@@ -1634,17 +1714,12 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         pos = event.position()
         was_hover_pin = self._hover_pin
         self._hover_pin = self._pin_rect.contains(pos)
-        if self._hover_pin != was_hover_pin:
+        if not self._dragging and self._hover_pin != was_hover_pin:
             self.setCursor(Qt.PointingHandCursor if self._hover_pin else Qt.ArrowCursor)
             self.update()
 
         if self._dragging and (event.buttons() & Qt.LeftButton):
-            new_pos = event.globalPosition().toPoint() - self._drag_offset
-            # Magnetic snap to Left Golden Column (X=24)
-            if abs(new_pos.x() - 24) <= 12:
-                new_pos.setX(24)
-            self.move(new_pos)
-            self.positionChangedByUser.emit()
+            self._move_smart_drag(event.globalPosition().toPoint(), event.modifiers())
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1656,8 +1731,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 self.update()
                 return
             if pos.y() <= self.HEADER_HEIGHT and self._allow_drag_provider():
-                self._dragging = True
-                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self._begin_smart_drag(event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -1671,7 +1745,7 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._dragging = False
+        self._end_smart_drag()
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
@@ -1732,14 +1806,40 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
         elif chosen == act_hide:
             self.contextActionTriggered.emit("toggle_visibility")
 
+    def _calc_drop_index(self, pos: QPointF) -> int:
+        step_x = self.TILE_W + self.GRID_SPACING_X
+        step_y = self.TILE_H + self.GRID_SPACING_Y
+        col = max(0, min(self.COLS, int(round((pos.x() - self.GRID_PAD_X) / step_x))))
+        row = max(0, int((pos.y() - self.HEADER_HEIGHT) // step_y))
+        return max(0, min(self._item_count, row * self.COLS + col))
+
     def dragEnterEvent(self, event):
         md = event.mimeData()
         if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
             self.expand_card()
+            self._drop_insert_idx = self._calc_drop_index(event.position())
+            self.update()
             event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        md = event.mimeData()
+        if md.hasFormat(AURORA_MIME_TYPE) or md.hasUrls() or has_shell_idlist_mime(md):
+            idx = self._calc_drop_index(event.position())
+            if idx != self._drop_insert_idx:
+                self._drop_insert_idx = idx
+                self.update()
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        if self._drop_insert_idx is not None:
+            self._drop_insert_idx = None
+            self.update()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
         pos = event.position()
+        self._drop_insert_idx = None
+        self.update()
         md = event.mimeData()
         if md.hasFormat(AURORA_MIME_TYPE):
             raw = bytes(md.data(AURORA_MIME_TYPE)).decode("utf-8", errors="ignore")
@@ -1868,3 +1968,31 @@ class CollapsibleAuroraCard(AuroraBaseWindow):
                 y_offset = -6.0 * (1.0 - prog)
                 painter.drawPixmap(QPointF(0.0, float(self.HEADER_HEIGHT) + y_offset), self._grid_snapshot)
                 painter.restore()
+
+        # 6. Live drag-to-reorder glowing insertion indicator bar
+        if self._drop_insert_idx is not None and self._expanded and cur_h > self.HEADER_HEIGHT + 20:
+            idx = max(0, min(self._item_count, self._drop_insert_idx))
+            row = idx // self.COLS
+            col = idx % self.COLS
+            if idx == self._item_count and self._item_count > 0 and col == 0:
+                # Place right after the last tile of the previous full row
+                row = (idx - 1) // self.COLS
+                col = self.COLS
+            step_x = self.TILE_W + self.GRID_SPACING_X
+            step_y = self.TILE_H + self.GRID_SPACING_Y
+            ix = self.GRID_PAD_X + col * step_x - self.GRID_SPACING_X / 2.0
+            y1 = float(self.HEADER_HEIGHT + row * step_y + 8)
+            y2 = min(float(cur_h - 10), y1 + self.TILE_H - 16.0)
+            if y2 > y1 + 6.0:
+                halo = QColor(c1); halo.setAlpha(95)
+                painter.setPen(QPen(halo, 6.0, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(QPointF(ix, y1), QPointF(ix, y2))
+                igrad = QLinearGradient(ix, y1, ix, y2)
+                igrad.setColorAt(0.0, c1)
+                igrad.setColorAt(1.0, c2)
+                painter.setPen(QPen(igrad, 2.4, Qt.SolidLine, Qt.RoundCap))
+                painter.drawLine(QPointF(ix, y1), QPointF(ix, y2))
+                painter.setBrush(QColor(255, 255, 255, 240))
+                painter.setPen(Qt.NoPen)
+                painter.drawEllipse(QPointF(ix, y1), 2.5, 2.5)
+                painter.drawEllipse(QPointF(ix, y2), 2.5, 2.5)

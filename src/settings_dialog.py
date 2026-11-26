@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -713,6 +714,14 @@ class AuroraSettingsWindow(QWidget):
             self.sw_lock_pos,
         ))
 
+        self.sw_smart_guides = AuroraToggleSwitch()
+        self.sw_smart_guides.toggled.connect(lambda v: not self._syncing and self.ctrl.set_smart_guides_enabled(v))
+        l_boot.addLayout(_make_setting_row(
+            "拖动时显示智能参考线与磁吸对齐",
+            "拖动胶囊、卡片、速记或时钟时自动磁吸边缘/中线/标准间距并显示极光预览（按住 Alt 可临时禁用吸附）",
+            self.sw_smart_guides,
+        ))
+
         self.sw_memo = AuroraToggleSwitch()
         self.sw_memo.toggled.connect(lambda v: not self._syncing and self.ctrl.set_show_memo(v))
         l_boot.addLayout(_make_setting_row(
@@ -720,9 +729,35 @@ class AuroraSettingsWindow(QWidget):
             "在胶囊瀑布流末尾挂载一张实时自动保存的毛玻璃桌面速记便签",
             self.sw_memo,
         ))
+
+        self.sw_media_capsule = AuroraToggleSwitch()
+        self.sw_media_capsule.toggled.connect(lambda v: not self._syncing and self.ctrl.set_show_media_capsule(v))
+        l_boot.addLayout(_make_setting_row(
+            "显示极光媒体播放胶囊 (Windows SMTC)",
+            "自动识别网易云 / Apple Music / Spotify / 浏览器播放状态，提取专辑封面极光背光并支持悬停切歌、滚轮切源",
+            self.sw_media_capsule,
+        ))
         lay.addWidget(c_boot)
 
-        c_layout, l_layout = _make_card("📐 布局与桌面快捷方式同步")
+        c_layout, l_layout = _make_card("📐 布局预设与桌面快捷方式同步")
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        self.combo_layout_preset = QComboBox()
+        self.combo_layout_preset.currentIndexChanged.connect(self._sync_preset_buttons)
+        b_apply_preset = QPushButton("应用布局")
+        b_apply_preset.setObjectName("primaryBtn")
+        b_apply_preset.clicked.connect(self._on_apply_layout_preset)
+        b_save_preset = QPushButton("💾 保存当前布局...")
+        b_save_preset.clicked.connect(self._on_save_layout_preset)
+        self.btn_del_preset = QPushButton("删除")
+        self.btn_del_preset.setObjectName("dangerBtn")
+        self.btn_del_preset.clicked.connect(self._on_delete_layout_preset)
+        preset_row.addWidget(self.combo_layout_preset, 1)
+        preset_row.addWidget(b_apply_preset)
+        preset_row.addWidget(b_save_preset)
+        preset_row.addWidget(self.btn_del_preset)
+        l_layout.addLayout(preset_row)
+
         btn_row1 = QHBoxLayout()
         btn_row1.setSpacing(10)
         b_reset = QPushButton("重置左侧黄金布局")
@@ -1654,6 +1689,62 @@ class AuroraSettingsWindow(QWidget):
         if hasattr(self, "btn_qa_vis"):
             self.btn_qa_vis.setText("🙈 隐藏卡片" if self.ctrl.visible_state else "✨ 显示卡片")
 
+    def _refresh_layout_presets(self):
+        if not hasattr(self, "combo_layout_preset"):
+            return
+        cur_data = self.combo_layout_preset.currentData()
+        self.combo_layout_preset.blockSignals(True)
+        self.combo_layout_preset.clear()
+        for key, label in self.ctrl.get_builtin_layout_presets():
+            self.combo_layout_preset.addItem(label, ("builtin", key))
+        for name in sorted(self.ctrl.layout_presets.keys(), key=lambda s: s.lower()):
+            self.combo_layout_preset.addItem(f"⭐ 自定义：{name}", ("custom", name))
+        if cur_data is not None:
+            for i in range(self.combo_layout_preset.count()):
+                if self.combo_layout_preset.itemData(i) == cur_data:
+                    self.combo_layout_preset.setCurrentIndex(i)
+                    break
+        self.combo_layout_preset.blockSignals(False)
+        self._sync_preset_buttons()
+
+    def _sync_preset_buttons(self):
+        if not hasattr(self, "btn_del_preset"):
+            return
+        data = self.combo_layout_preset.currentData()
+        self.btn_del_preset.setEnabled(bool(isinstance(data, tuple) and data[0] == "custom"))
+
+    def _on_apply_layout_preset(self):
+        data = self.combo_layout_preset.currentData()
+        if not isinstance(data, tuple):
+            return
+        kind, key = data
+        if kind == "builtin":
+            self.ctrl.apply_builtin_layout(key)
+        else:
+            self.ctrl.apply_layout_preset(key)
+
+    def _on_save_layout_preset(self):
+        dlg = QInputDialog(self)
+        dlg.setStyleSheet(DIALOG_QSS)
+        dlg.setWindowTitle("保存当前桌面布局")
+        dlg.setLabelText("请输入布局预设名称（例如：工作双栏 / 极简壁纸）：")
+        if dlg.exec() != QInputDialog.Accepted:
+            return
+        name = dlg.textValue().strip()
+        if not name:
+            return
+        self.ctrl.save_layout_preset(name)
+        self._refresh_layout_presets()
+        for i in range(self.combo_layout_preset.count()):
+            if self.combo_layout_preset.itemData(i) == ("custom", name):
+                self.combo_layout_preset.setCurrentIndex(i)
+                break
+
+    def _on_delete_layout_preset(self):
+        data = self.combo_layout_preset.currentData()
+        if isinstance(data, tuple) and data[0] == "custom":
+            self.ctrl.delete_layout_preset(data[1])
+
     def refresh_all(self):
         self._syncing = True
         try:
@@ -1662,7 +1753,10 @@ class AuroraSettingsWindow(QWidget):
             self.sw_autorun.setChecked(self.ctrl.is_autorun_enabled())
             self.sw_dbl_hide.setChecked(self.ctrl.double_click_hide)
             self.sw_lock_pos.setChecked(self.ctrl.lock_positions)
+            self.sw_smart_guides.setChecked(self.ctrl.smart_guides_enabled)
             self.sw_memo.setChecked(self.ctrl.show_memo)
+            self.sw_media_capsule.setChecked(self.ctrl.show_media_capsule)
+            self._refresh_layout_presets()
             self._refresh_groups_page()
             self._refresh_icons_page()
             self._refresh_hotkeys_page()
