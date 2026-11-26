@@ -26,7 +26,7 @@ No bloated framework, no heavyweight background service — one exe does it all.
 
 ## 📸 Screenshots
 
-![Aurora Desktop overview: capsules, artistic clock & transparent taskbar](docs/images/hero-desktop.jpg)
+![Aurora Desktop overview: frosted capsules, SMTC media capsule, artistic clock & transparent taskbar](docs/images/hero-desktop.jpg)
 
 ![Frosted capsule cards: AI bar & auto-grouped organizer](docs/images/capsule-cards.png)
 
